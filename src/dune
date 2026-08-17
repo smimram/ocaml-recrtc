@@ -1,4 +1,5 @@
 (executable
  (name recrtc)
- (libraries dream)
+ (libraries dream lwt.unix)
+ (preprocess (pps lwt_ppx))
 )

@@ -1,8 +1,56 @@
-<!DOCTYPE html>
 <html>
   <head>
+    <title>Record</title>
   </head>
   <body>
     <h1>Hello world!</h1>
+    <button id="rec">Record audio</button>
+    <script>
+      const button = document.getElementById("rec");
+      let recorder = null;
+      let stream = null;
+      // Chunks must reach the server in order, so each upload is chained onto
+      // the previous one.
+      let uploads = Promise.resolve();
+
+      async function start() {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        await fetch("/record/start", { method: "POST" });
+        const mimeType = MediaRecorder.isTypeSupported("audio/webm")
+          ? "audio/webm"
+          : undefined;
+        recorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+        recorder.ondataavailable = (e) => {
+          if (!e.data.size) return;
+          uploads = uploads.then(() =>
+            fetch("/record/chunk", { method: "POST", body: e.data })
+          );
+        };
+        recorder.onstop = async () => {
+          stream.getTracks().forEach((t) => t.stop());
+          await uploads;
+          recorder = null;
+          button.textContent = "Record audio";
+          button.disabled = false;
+        };
+        recorder.start(250);
+        button.textContent = "Stop recording";
+      }
+
+      button.onclick = async () => {
+        if (recorder) {
+          button.disabled = true;
+          recorder.stop();
+        } else {
+          button.disabled = true;
+          try {
+            await start();
+          } catch (e) {
+            alert("Could not record: " + e);
+          }
+          button.disabled = false;
+        }
+      };
+    </script>
   </body>
 </html>
