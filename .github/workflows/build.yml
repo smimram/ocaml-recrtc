@@ -35,7 +35,9 @@ jobs:
         run: opam exec -- dune test --force
 
       - name: Build documentation
-        run: opam exec -- dune build @doc
+        run: |
+          opam install --yes odoc
+          opam exec -- dune build @doc
 
       - name: Upload documentation
         if: github.ref == 'refs/heads/main'
