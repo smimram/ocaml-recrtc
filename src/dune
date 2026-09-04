@@ -1,4 +1,4 @@
 (executable
  (name recrtc)
- (libraries dream dtls ice sdp lwt.unix mirage-crypto-rng.unix)
+ (libraries dream dtls ice rtp sdp srtp lwt.unix mirage-crypto-rng.unix)
  (preprocess (pps lwt_ppx)))

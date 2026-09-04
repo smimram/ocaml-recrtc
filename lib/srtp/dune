@@ -1,0 +1,3 @@
+(library
+ (name srtp)
+ (libraries digestif mirage-crypto rtp))

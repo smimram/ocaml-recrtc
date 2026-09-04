@@ -28,6 +28,7 @@ type session = {
   ice : Ice.Agent.t;
   offer : Sdp.offer;
   dtls : Dtls.Server.t;
+  mutable srtp : Srtp.t option;
   created : float;
 }
 
@@ -57,6 +58,7 @@ let handle_offer request =
           ice;
           offer;
           dtls = Dtls.Server.create (Lazy.force dtls_config);
+          srtp = None;
           created = Unix.gettimeofday ();
         }
       in
@@ -133,11 +135,52 @@ let handle_dtls socket ~source session datagram =
   | Dtls.Server.Failed message ->
       log.warning (fun log ->
           log "session %s: DTLS handshake failed: %s" session.ice.local.ufrag message)
-  | Dtls.Server.Established { profile; keying = _ } ->
-      log.info (fun log ->
-          log "session %s: DTLS established, SRTP profile 0x%04x" session.ice.local.ufrag
-            profile));
+  | Dtls.Server.Established { profile = _; keying } ->
+      (* The handshake keeps reporting itself established as the peer repeats
+         its last flight; the keys are taken once. *)
+      if session.srtp = None then begin
+        (* We only ever receive, so the client's half of the keying material is
+           the one we need. *)
+        session.srtp <-
+          Some
+            (Srtp.create ~master_key:keying.srtp_client_key
+               ~master_salt:keying.srtp_client_salt);
+        log.info (fun log ->
+            log "session %s: DTLS established, SRTP keys in hand"
+              session.ice.local.ufrag)
+      end);
   Lwt.return_unit
+
+let handle_media session datagram =
+  match session.srtp with
+  | None ->
+      (* Media before the handshake finished: there is nothing to decrypt it
+         with yet. *)
+      log.debug (fun log -> log "media before the SRTP keys were exchanged")
+  | Some srtp ->
+      let unprotect =
+        if Rtp.Packet.is_rtcp datagram then Srtp.unprotect_rtcp srtp
+        else Srtp.unprotect srtp
+      in
+      (match unprotect datagram with
+      | Error error ->
+          log.warning (fun log ->
+              log "session %s: %s" session.ice.local.ufrag (Srtp.string_of_error error))
+      | Ok packet when Rtp.Packet.is_rtcp datagram ->
+          log.debug (fun log -> log "RTCP, %d bytes" (String.length packet))
+      | Ok packet -> (
+          match Rtp.Packet.parse packet with
+          | exception Rtp.Packet.Invalid message ->
+              log.warning (fun log -> log "malformed RTP packet: %s" message)
+          | packet when packet.payload_type <> session.offer.opus.payload_type ->
+              (* Comfort noise, retransmissions and redundancy all arrive on
+                 payload types of their own; we want the Opus stream. *)
+              log.debug (fun log ->
+                  log "ignoring payload type %d" packet.payload_type)
+          | packet ->
+              log.debug (fun log ->
+                  log "Opus: sequence %d, timestamp %lu, %d bytes" packet.sequence
+                    packet.timestamp (String.length packet.payload))))
 
 let handle_datagram socket ~source datagram =
   let session () = Hashtbl.find_opt sessions_by_peer source in
@@ -153,10 +196,7 @@ let handle_datagram socket ~source datagram =
   | b when b >= 128 && b < 192 ->
       (match session () with
       | None -> log.debug (fun log -> log "media from an unknown peer")
-      | Some session ->
-          log.debug (fun log ->
-              log "media packet (SRTP not implemented yet), Opus is expected on payload type %d"
-                session.offer.opus.payload_type));
+      | Some session -> handle_media session datagram);
       Lwt.return_unit
   | b ->
       log.debug (fun log -> log "unrecognised datagram starting with 0x%02x" b);
