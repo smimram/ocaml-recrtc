@@ -166,3 +166,7 @@ let run () =
     (Int64.float_of_bits (String.get_int64_be data duration) > 900.);
 
   Sys.remove path
+
+let () =
+  run ();
+  exit_status ()

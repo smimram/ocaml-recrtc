@@ -1,3 +1,9 @@
 (library
  (name srtp)
+ (modules :standard \ test)
  (libraries digestif mirage-crypto rtp))
+
+(test
+ (name test)
+ (modules test)
+ (libraries mirage-crypto srtp testlib))

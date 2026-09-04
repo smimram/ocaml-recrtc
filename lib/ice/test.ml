@@ -118,3 +118,7 @@ let run () =
   let m = decode "corrupted request" (Bytes.to_string corrupted) in
   check "corruption breaks integrity" (not (Ice.Stun.check_integrity ~key:password m));
   check "corruption breaks fingerprint" (not (Ice.Stun.check_fingerprint m))
+
+let () =
+  run ();
+  exit_status ()

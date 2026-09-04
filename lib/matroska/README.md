@@ -64,7 +64,7 @@ having to.
 
 ## Testing
 
-`test/test_matroska.ml`: the variable-width integers at each width boundary,
+`test.ml`: the variable-width integers at each width boundary,
 including the reserved all-ones value; then a small two-track file, walked
 element by element to check that every length lands exactly on the end of its
 contents, that both tracks are declared, that a cluster opens at each keyframe,

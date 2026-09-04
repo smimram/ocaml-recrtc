@@ -48,7 +48,7 @@ follows the first two words is encrypted.
 
 ## Testing
 
-`test/test_srtp.ml` runs the RFC 3711 appendix B vectors — B.3 for all three
+`test.ml` runs the RFC 3711 appendix B vectors — B.3 for all three
 derived keys, B.2 for the counter block and keystream — because a homegrown
 crypto test only proves the code agrees with itself.
 

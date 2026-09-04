@@ -1,4 +1,5 @@
-(** The RTP header parser and the jitter buffer. *)
+(** The RTP header parser and the jitter buffer; the payload formats are in
+    the [Test_vp8], [Test_vp9] and [Test_h264] modules beside this one. *)
 
 open Testlib
 
@@ -46,14 +47,11 @@ let run () =
   check "giving up on 104" (push 108 = [ 105; 106; 107; 108 ]);
   check "the loss is counted" (Rtp.Reorder.lost buffer = 1);
   check "and the stream carries on" (push 109 = [ 109 ]);
+  ()
 
-  suite "opus";
-  (* Table-of-contents parsing: configuration 15 is 20 ms, and the two low bits
-     say how many frames follow (RFC 6716 §3.1). *)
-  check "one 20 ms frame" (Oggopus.Writer.samples "\x78" = 960);
-  check "two 20 ms frames" (Oggopus.Writer.samples "\x79" = 1920);
-  check "a 10 ms frame" (Oggopus.Writer.samples "\x70" = 480);
-  check "an arbitrary number of frames"
-    (Oggopus.Writer.samples "\x7B\x03" = 3 * 960);
-  check "a 2.5 ms CELT frame" (Oggopus.Writer.samples "\x80" = 120);
-  check "an empty packet" (Oggopus.Writer.samples "" = 0)
+let () =
+  run ();
+  Test_vp8.run ();
+  Test_vp9.run ();
+  Test_h264.run ();
+  exit_status ()

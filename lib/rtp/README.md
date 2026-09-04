@@ -95,12 +95,12 @@ picture partway through, discards the whole frame and counts it.
 
 ## Testing
 
-`test/test_vp8.ml`, `test/test_vp9.ml` and `test/test_h264.ml` cover the
+`test_vp8.ml`, `test_vp9.ml` and `test_h264.ml` cover the
 descriptors — including the ones a browser actually sends, and the scalability
 structure — the fragmenting, and the picture size read back out of a keyframe
 and out of two real parameter sets — one baseline and one high profile, both cropped, both
 carrying emulation-prevention bytes.
 
-`test/test_rtp.ml`: a packet with two CSRCs and a header extension, so the
+`test.ml`: a packet with two CSRCs and a header extension, so the
 payload offset depends on both; then the buffer, through reordering, a
 duplicate, a late arrival, a gap that fills and a gap that never does.

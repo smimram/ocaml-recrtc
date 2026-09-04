@@ -65,7 +65,7 @@ crash is still a playable file, short of its last page.
 
 ## Testing
 
-The Opus framing has unit tests in `test/test_rtp.ml`; the container is checked
+The Opus framing has unit tests in `test.ml`; the container is checked
 against the players that have to read it:
 
 ```sh

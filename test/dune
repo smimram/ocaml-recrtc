@@ -1,8 +1,7 @@
-(test
- (name test_recrtc)
- (modules test_recrtc testlib test_stun test_srtp test_rtp test_vp8 test_vp9 test_h264
-   test_matroska)
- (libraries ice matroska mirage-crypto oggopus rtp sdp srtp))
+; The harness the tests beside each library share.
+(library
+ (name testlib)
+ (modules testlib))
 
 ; A standalone DTLS server, to exercise lib/dtls against another
 ; implementation: openssl s_client -dtls1_2 -use_srtp SRTP_AES128_CM_SHA1_80

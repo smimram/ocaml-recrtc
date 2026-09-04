@@ -1,3 +1,9 @@
 (library
  (name matroska)
+ (modules :standard \ test)
  (libraries oggopus rtp))
+
+(test
+ (name test)
+ (modules test)
+ (libraries matroska testlib))

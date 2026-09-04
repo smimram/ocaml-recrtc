@@ -30,11 +30,17 @@ is usually the fastest way to see why a browser is not sending something.
 to advertise is not one the machine can see for itself; see "The advertised
 address" below.
 
-Tests are one executable (`dune exec test/test_recrtc.exe`) built from
-`test/testlib.ml` plus one module per area. There is no per-test filter: to run
-a single suite, comment out the other `Test_*.run ()` calls in
-`test/test_recrtc.ml`. A new test module must be added **both** to the
-`(modules ...)` field in `test/dune` and to `test_recrtc.ml`.
+Tests live beside the code they cover: each library that has any carries a
+`test.ml` next to its modules, run by a `(test)` stanza in the same `dune` file
+as the library. `dune test` runs them all; one alone is `dune exec
+lib/rtp/test.exe`. They share the harness in `test/testlib.ml`, which is a
+library of its own (`test/dune` also holds `dtls_harness.ml`).
+
+Because a library and its test sit in one directory, both stanzas need explicit
+`(modules ...)`: the library takes `:standard \ test ...` and the test the
+list of its own modules. A new test module must be added to both. `lib/rtp` is
+the one with several, `test.ml` being the entry point that calls the payload
+format ones.
 
 ### Testing against other implementations
 

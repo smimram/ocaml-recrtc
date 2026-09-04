@@ -121,3 +121,7 @@ let run () =
   check "another key does not authenticate"
     (Srtp.unprotect other (protect ~roc:1 ~sequence:300)
     = Error Srtp.Authentication_failed)
+
+let () =
+  run ();
+  exit_status ()

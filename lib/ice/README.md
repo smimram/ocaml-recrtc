@@ -71,7 +71,7 @@ Tags are compared in constant time.
 
 ## Testing
 
-`test/test_stun.ml` runs the RFC 5769 §2.1–2.3 vectors: a request and an IPv4
+`test.ml` runs the RFC 5769 §2.1–2.3 vectors: a request and an IPv4
 and IPv6 response, each checked for its attributes, its integrity under the
 published password, and its fingerprint, plus a round trip through our own
 encoder and a corruption that must break both.

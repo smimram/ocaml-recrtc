@@ -1,2 +1,8 @@
 (library
- (name rtp))
+ (name rtp)
+ (modules :standard \ test test_vp8 test_vp9 test_h264))
+
+(test
+ (name test)
+ (modules test test_vp8 test_vp9 test_h264)
+ (libraries rtp testlib))

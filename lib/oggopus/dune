@@ -1,3 +1,9 @@
 (library
  (name oggopus)
+ (modules :standard \ test)
  (libraries rtp))
+
+(test
+ (name test)
+ (modules test)
+ (libraries oggopus testlib))
