@@ -1,3 +1,11 @@
 (test
  (name test_recrtc)
+ (modules test_recrtc testlib test_stun)
  (libraries ice sdp))
+
+; A standalone DTLS server, to exercise lib/dtls against another
+; implementation: openssl s_client -dtls1_2 -use_srtp SRTP_AES128_CM_SHA1_80
+(executable
+ (name dtls_harness)
+ (modules dtls_harness)
+ (libraries dtls mirage-crypto-rng.unix unix))

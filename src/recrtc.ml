@@ -15,9 +15,19 @@ let media_port = ref 7000
    forwarding. *)
 let advertised_ip = ref "127.0.0.1"
 
+(* The media socket is bound to the advertised address rather than to every
+   interface, so that our answers to connectivity checks always leave from the
+   address they were sent to. A peer discards a response coming from anywhere
+   else (RFC 8445 §7.2.5.2.1), and a wildcard socket would let the routing table
+   choose. Behind a one-to-one NAT the two differ, and the local address must
+   then be given explicitly. *)
+let bind_ip = ref None
+let debug = ref false
+
 type session = {
   ice : Ice.Agent.t;
   offer : Sdp.offer;
+  dtls : Dtls.Server.t;
   created : float;
 }
 
@@ -28,6 +38,7 @@ let sessions : (string, session) Hashtbl.t = Hashtbl.create 16
 let sessions_by_peer : (Unix.sockaddr, session) Hashtbl.t = Hashtbl.create 16
 
 let certificate = lazy (Dtls.Certificate.generate ())
+let dtls_config = lazy (Dtls.Server.config (Lazy.force certificate))
 
 let log = Dream.sub_log "recrtc"
 
@@ -41,7 +52,14 @@ let handle_offer request =
       Dream.respond ~status:`Bad_Request message
   | offer ->
       let ice = Ice.Agent.create ~remote:{ ufrag = offer.ice_ufrag; pwd = offer.ice_pwd } in
-      let session = { ice; offer; created = Unix.gettimeofday () } in
+      let session =
+        {
+          ice;
+          offer;
+          dtls = Dtls.Server.create (Lazy.force dtls_config);
+          created = Unix.gettimeofday ();
+        }
+      in
       Hashtbl.replace sessions ice.local.ufrag session;
       let answer =
         Sdp.answer ~offer ~ip:!advertised_ip ~port:!media_port
@@ -107,16 +125,31 @@ let handle_stun socket ~source datagram =
           track_peer session previous;
           send socket ~destination:source response)
 
+let handle_dtls socket ~source session datagram =
+  let datagrams, event = Dtls.Server.handle session.dtls datagram in
+  let%lwt () = Lwt_list.iter_s (send socket ~destination:source) datagrams in
+  (match event with
+  | Dtls.Server.Pending -> ()
+  | Dtls.Server.Failed message ->
+      log.warning (fun log ->
+          log "session %s: DTLS handshake failed: %s" session.ice.local.ufrag message)
+  | Dtls.Server.Established { profile; keying = _ } ->
+      log.info (fun log ->
+          log "session %s: DTLS established, SRTP profile 0x%04x" session.ice.local.ufrag
+            profile));
+  Lwt.return_unit
+
 let handle_datagram socket ~source datagram =
   let session () = Hashtbl.find_opt sessions_by_peer source in
   match Char.code datagram.[0] with
   (* RFC 7983 demultiplexing. *)
   | b when b < 4 -> handle_stun socket ~source datagram
-  | b when b >= 20 && b < 64 ->
-      (match session () with
-      | None -> log.debug (fun log -> log "DTLS from an unknown peer")
-      | Some _ -> log.info (fun log -> log "DTLS record (handshake not implemented yet)"));
-      Lwt.return_unit
+  | b when b >= 20 && b < 64 -> (
+      match session () with
+      | None ->
+          log.debug (fun log -> log "DTLS from an unknown peer");
+          Lwt.return_unit
+      | Some session -> handle_dtls socket ~source session datagram)
   | b when b >= 128 && b < 192 ->
       (match session () with
       | None -> log.debug (fun log -> log "media from an unknown peer")
@@ -170,7 +203,9 @@ let rec reap_sessions () =
 let media_socket () =
   let socket = Lwt_unix.socket PF_INET SOCK_DGRAM 0 in
   Lwt_unix.setsockopt socket SO_REUSEADDR true;
-  Lwt_unix.bind socket (Unix.ADDR_INET (Unix.inet_addr_any, !media_port))
+  let address = Option.value !bind_ip ~default:!advertised_ip in
+  Lwt_unix.bind socket
+    (Unix.ADDR_INET (Unix.inet_addr_of_string address, !media_port))
   |> Lwt.map (fun () -> socket)
 
 (* Entry point ------------------------------------------------------------ *)
@@ -183,6 +218,10 @@ let () =
         Arg.Set_string http_interface,
         "ADDRESS  interface the HTTP server binds to (default localhost, use          0.0.0.0 to accept connections from other machines)" );
       ("--media-port", Arg.Set_int media_port, "PORT  UDP port for media (default 7000)");
+      ("--debug", Arg.Set debug, "  log every datagram that is dropped");
+      ( "--bind",
+        Arg.String (fun address -> bind_ip := Some address),
+        "ADDRESS  local address the media socket binds to, when it differs          from the advertised one (behind a NAT, say)" );
       ( "--ip",
         Arg.Set_string advertised_ip,
         "ADDRESS  the address advertised as our ICE candidate, which must be \
@@ -190,12 +229,19 @@ let () =
     ]
     (fun argument -> raise (Arg.Bad ("unexpected argument: " ^ argument)))
     "recrtc [options]";
+  Dream.initialize_log ~level:(if !debug then `Debug else `Info) ();
+  (* The sub-log keeps the threshold it was created with, so it needs telling
+     separately. *)
+  if !debug then Dream.set_log_level "recrtc" `Debug;
   Mirage_crypto_rng_unix.use_default ();
   log.info (fun log ->
       log "certificate fingerprint %s" (Lazy.force certificate).fingerprint);
   Lwt.async (fun () ->
       let%lwt socket = media_socket () in
-      log.info (fun log -> log "media socket listening on UDP port %d" !media_port);
+      log.info (fun log ->
+          log "media socket listening on %s:%d"
+            (Option.value !bind_ip ~default:!advertised_ip)
+            !media_port);
       media_loop socket);
   Lwt.async reap_sessions;
   Dream.run ~interface:!http_interface ~port:!http_port

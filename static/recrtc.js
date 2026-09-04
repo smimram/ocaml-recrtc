@@ -77,3 +77,15 @@ button.onclick = async () => {
   }
   button.disabled = false;
 };
+
+// Lets a headless browser exercise the whole path without a click:
+// http://localhost:8080/?autostart
+if (new URLSearchParams(location.search).has("autostart")) {
+  button.click();
+}
+
+// Lets a headless browser exercise the whole path without a click:
+// http://localhost:8080/?autostart
+if (new URLSearchParams(location.search).has("autostart")) {
+  button.click();
+}
