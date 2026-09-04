@@ -74,6 +74,133 @@ let run () =
     ~expected:(hex "81CE0002 DEADBEEF 0000002A")
     (Rtp.Rtcp.pli ~sender:0xDEADBEEFl ~media:42l);
   check "which reads as RTCP" (Rtp.Packet.is_rtcp (Rtp.Rtcp.pli ~sender:1l ~media:2l));
+
+  (* RFC 3550 §6.4.2: version 2, one report block, payload type 201, seven
+     words after the header word. *)
+  check_string "a receiver report"
+    ~expected:
+      (hex
+         "81C90007 DEADBEEF CAFEBABE 10000005 00001234 00000040 AABBCCDD \
+          00008000")
+    (Rtp.Rtcp.receiver_report ~sender:0xDEADBEEFl
+       [
+         {
+           Rtp.Rtcp.source = 0xCAFEBABEl;
+           fraction_lost = 0x10;
+           cumulative_lost = 5;
+           extended_highest = 0x1234l;
+           jitter = 0x40l;
+           last_sr = 0xAABBCCDDl;
+           delay_since_last_sr = 0x8000l;
+         };
+       ]);
+
+  (* RFC 3550 §6.5: one chunk, payload type 202; the CNAME is item type 1 with
+     its own length, and the chunk is terminated and padded with nulls. *)
+  check_string "a source description"
+    ~expected:(hex "81CA0003 DEADBEEF 0103616263 000000")
+    (Rtp.Rtcp.source_description ~sender:0xDEADBEEFl ~cname:"abc");
+
+  (* A sender report, then something else, so that the walk has to step over a
+     packet to reach the end. The timestamp read out is the middle 32 bits of
+     the NTP one. *)
+  let sender_report =
+    hex
+      ("80C80006" ^ "11223344" (* SSRC *) ^ "0102030405060708" (* NTP *)
+     ^ "00000000" (* RTP timestamp *) ^ "00000000" (* packet count *)
+     ^ "00000000" (* octet count *))
+  in
+  check "a sender report is read"
+    (Rtp.Rtcp.sender_reports sender_report = [ (0x11223344l, 0x03040506l) ]);
+  check "and found after one that is stepped over"
+    (Rtp.Rtcp.sender_reports
+       (Rtp.Rtcp.compound
+          [
+            Rtp.Rtcp.source_description ~sender:1l ~cname:"x"; sender_report;
+          ])
+    = [ (0x11223344l, 0x03040506l) ]);
+  check "a truncated packet stops the walk"
+    (Rtp.Rtcp.sender_reports (String.sub sender_report 0 20) = []);
+
+  suite "reception";
+  let packet ?(ssrc = 0xCAFEBABEl) ~sequence ~timestamp () =
+    {
+      Rtp.Packet.padding = false;
+      marker = false;
+      payload_type = 111;
+      sequence;
+      timestamp = Int32.of_int timestamp;
+      ssrc;
+      csrc = [];
+      extension = None;
+      payload = "";
+      header_length = 12;
+    }
+  in
+  let reception = Rtp.Reception.create ~clock_rate:48000 in
+  check "nothing to report before anything arrives"
+    (Rtp.Reception.report ~now:0. reception = None);
+  let receive now sequence timestamp =
+    Rtp.Reception.receive ~now reception (packet ~sequence ~timestamp ())
+  in
+  receive 0. 1000 0;
+  receive 0.02 1001 960;
+  check "the source is the one that arrived"
+    (Rtp.Reception.source reception = Some 0xCAFEBABEl);
+  (match Rtp.Reception.report ~now:0.02 reception with
+  | None -> check "a report once a packet has arrived" false
+  | Some report ->
+      check "nothing lost" (report.fraction_lost = 0 && report.cumulative_lost = 0);
+      check "the highest sequence number" (report.extended_highest = 1001l);
+      check "a steady stream has no jitter" (report.jitter = 0l);
+      check "and no sender report to echo"
+        (report.last_sr = 0l && report.delay_since_last_sr = 0l));
+
+  (* One packet of the two expected since the last report never arrives, and
+     the one that does arrives 20 ms after its timestamp says it should. *)
+  receive 0.08 1003 2880;
+  (match Rtp.Reception.report ~now:0.08 reception with
+  | None -> check "a report after a loss" false
+  | Some report ->
+      check "half the interval was lost" (report.fraction_lost = 128);
+      check "and counted cumulatively" (report.cumulative_lost = 1);
+      (* The packet came 20 ms later than its timestamp said, which is 960
+         ticks of deviation, smoothed by a sixteenth. *)
+      check "the delay shows as jitter" (report.jitter = 60l));
+
+  (* A gap is only a gap: the reordered packet still counts as arriving. *)
+  receive 0.1 1002 1920;
+  (match Rtp.Reception.report ~now:0.1 reception with
+  | None -> check "a report after the straggler" false
+  | Some report ->
+      check "the straggler cancels the loss" (report.cumulative_lost = 0);
+      check "and is not counted against the new interval"
+        (report.fraction_lost = 0));
+
+  let reception = Rtp.Reception.create ~clock_rate:48000 in
+  let receive now sequence timestamp =
+    Rtp.Reception.receive ~now reception (packet ~sequence ~timestamp ())
+  in
+  receive 0. 65534 0;
+  receive 0.02 65535 960;
+  receive 0.04 0 1920;
+  receive 0.06 1 2880;
+  (match Rtp.Reception.report ~now:0.06 reception with
+  | None -> check "a report across the wrap" false
+  | Some report ->
+      check "the sequence number wrap is counted"
+        (report.extended_highest = 0x10001l);
+      check "and nothing looks lost across it"
+        (report.fraction_lost = 0 && report.cumulative_lost = 0));
+
+  Rtp.Reception.sender_report ~now:0.1 reception ~ntp:0xAABBCCDDl;
+  (match Rtp.Reception.report ~now:0.6 reception with
+  | None -> check "a report echoing a sender report" false
+  | Some report ->
+      check "the sender report is echoed" (report.last_sr = 0xAABBCCDDl);
+      (* Half a second, in units of 1/65536 of one. *)
+      check "with how long ago it arrived"
+        (report.delay_since_last_sr = 32768l));
   ()
 
 let () =

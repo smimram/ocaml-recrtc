@@ -54,6 +54,8 @@ type audio = {
   audio_codec : Sdp.codec;
   (* The network may reorder packets; the file may not. *)
   audio_reorder : (int32 * string) Rtp.Reorder.t;
+  (* What arrived, for the reports that tell the browser about it. *)
+  audio_reception : Rtp.Reception.t;
 }
 
 type video = {
@@ -62,6 +64,7 @@ type video = {
   (* One picture is routinely thirty packets, so the buffer has to be far
      deeper than audio's to absorb the same amount of reordering. *)
   video_reorder : Rtp.Packet.t Rtp.Reorder.t;
+  video_reception : Rtp.Reception.t;
   frames : Rtp.Frame.t;
   (* Everything before the first keyframe is dropped, so that the recording
      opens on a picture that can be decoded on its own. *)
@@ -92,6 +95,10 @@ type session = {
   (* Our own synchronisation source. We send no media, so it names us in
      feedback packets and nowhere else. *)
   sender_ssrc : int32;
+  (* The name that stays put when the synchronisation source does not, which a
+     report has to carry (RFC 3550 §6.5). It says nothing about who we are:
+     RFC 7022 asks only that it be unlikely to collide. *)
+  cname : string;
   audio : audio option;
   (* Cleared if the camera never produces a picture, so that a session that
      offered video but sends none still leaves a recording of its audio. *)
@@ -358,7 +365,11 @@ let handle_offer request =
       let audio =
         Option.map
           (fun codec ->
-            { audio_codec = codec; audio_reorder = Rtp.Reorder.create () })
+            {
+              audio_codec = codec;
+              audio_reorder = Rtp.Reorder.create ();
+              audio_reception = Rtp.Reception.create ~clock_rate:codec.clock_rate;
+            })
           (Sdp.codec offer "audio")
       in
       let video =
@@ -372,6 +383,7 @@ let handle_offer request =
                      frame, so the same amount of reordering needs a much
                      deeper buffer to absorb it. *)
                   video_reorder = Rtp.Reorder.create ~depth:128 ();
+                  video_reception = Rtp.Reception.create ~clock_rate:codec.clock_rate;
                   frames = Rtp.Frame.create format;
                   started = false;
                   ssrc = None;
@@ -391,6 +403,7 @@ let handle_offer request =
           srtp = None;
           srtp_sender = None;
           sender_ssrc = Random.int32 Int32.max_int;
+          cname = Printf.sprintf "%Lx" (Random.int64 Int64.max_int);
           audio;
           video;
           recording = None;
@@ -618,6 +631,69 @@ let deliver_video socket session video packets =
         frames)
     packets
 
+(* Reports are due this often. RFC 3550 §6.2 would have a receiver work the
+   interval out from the session bandwidth and would not have it below five
+   seconds, but the profile in use is AVPF, where a report may be as prompt as
+   it is useful (RFC 4585 §3.4), and a sender adapting its bitrate wants to
+   hear more often than that. A second is what browsers themselves send. *)
+let report_interval = 1.
+
+let receptions session =
+  List.filter_map Fun.id
+    [
+      Option.map (fun audio -> audio.audio_reception) session.audio;
+      Option.map (fun video -> video.video_reception) session.video;
+    ]
+
+(* Of what a browser sends us, only the sender report is read, and of that only
+   the timestamp, which a report of ours echoes back. What the browser makes of
+   the round trip is its own business; that we let it measure one at all is the
+   point. *)
+let handle_rtcp session packet =
+  let reports = Rtp.Rtcp.sender_reports packet in
+  List.iter
+    (fun reception ->
+      List.iter
+        (fun (ssrc, ntp) ->
+          if Rtp.Reception.source reception = Some ssrc then
+            Rtp.Reception.sender_report reception ~ntp)
+        reports)
+    (receptions session);
+  log.debug (fun log ->
+      log "RTCP, %d bytes, %d sender report(s)" (String.length packet)
+        (List.length reports))
+
+(* A sender that hears nothing about what arrived has nothing to size its
+   bitrate against, and cannot measure a round trip at all. The report goes out
+   whether or not anything was lost, since it is the arriving of it that tells
+   the sender the path is working. *)
+let send_reports socket session =
+  match (session.srtp_sender, Ice.Agent.peer session.ice) with
+  | Some sender, Some destination -> (
+      match List.filter_map Rtp.Reception.report (receptions session) with
+      | [] -> ()
+      | reports ->
+          let compound =
+            Rtp.Rtcp.compound
+              [
+                Rtp.Rtcp.receiver_report ~sender:session.sender_ssrc reports;
+                (* A report travels with the name of who is reporting, and a
+                   compound packet is what RTCP is, reduced-size RTCP not being
+                   negotiated here (RFC 3550 §6.1). *)
+                Rtp.Rtcp.source_description ~sender:session.sender_ssrc
+                  ~cname:session.cname;
+              ]
+          in
+          send_async socket ~destination (Srtp.protect_rtcp sender compound);
+          List.iter
+            (fun (report : Rtp.Rtcp.report) ->
+              log.debug (fun log ->
+                  log "session %s: reported on %lx, %d lost of %ld, jitter %ld"
+                    (ufrag session) report.source report.cumulative_lost
+                    report.extended_highest report.jitter))
+            reports)
+  | _ -> ()
+
 (* The two streams share a transport under BUNDLE and are told apart by their
    payload type, which the answer fixed one per kind. *)
 let handle_rtp socket session (packet : Rtp.Packet.t) =
@@ -629,10 +705,12 @@ let handle_rtp socket session (packet : Rtp.Packet.t) =
   let video = matching (fun v -> v.video_codec.payload_type) session.video in
   match (audio, video) with
   | Some audio, _ ->
+      Rtp.Reception.receive audio.audio_reception packet;
       deliver_audio session
         (Rtp.Reorder.push audio.audio_reorder packet.sequence
            (packet.timestamp, packet.payload))
   | _, Some video ->
+      Rtp.Reception.receive video.video_reception packet;
       if video.ssrc = None then video.ssrc <- Some packet.ssrc;
       deliver_video socket session video
         (Rtp.Reorder.push video.video_reorder packet.sequence packet)
@@ -670,8 +748,7 @@ let handle_media socket session datagram =
       | Error error ->
           log.warning (fun log ->
               log "session %s: %s" (ufrag session) (Srtp.string_of_error error))
-      | Ok packet when Rtp.Packet.is_rtcp datagram ->
-          log.debug (fun log -> log "RTCP, %d bytes" (String.length packet))
+      | Ok packet when Rtp.Packet.is_rtcp datagram -> handle_rtcp session packet
       | Ok packet -> (
           match Rtp.Packet.parse packet with
           | exception Rtp.Packet.Invalid message ->
@@ -719,6 +796,15 @@ let media_loop socket =
     loop ()
   in
   loop ()
+
+(* Reports are the one thing here that is sent on a schedule rather than in
+   answer to a datagram. *)
+let rec report_loop socket =
+  let%lwt () = Lwt_unix.sleep report_interval in
+  Hashtbl.iter
+    (fun _ session -> send_reports socket session)
+    (Hashtbl.copy sessions);
+  report_loop socket
 
 (* Offers that never lead to a connection, and peers that go away without
    saying so, would otherwise accumulate. *)
@@ -792,6 +878,7 @@ let () =
           log "media socket listening on %s:%d, advertising %s" (bind_address ())
             !media_port
             (String.concat ", " !advertised_ips));
+      Lwt.async (fun () -> report_loop socket);
       media_loop socket);
   Lwt.async reap_sessions;
   Dream.run ~interface:!http_interface ~port:!http_port

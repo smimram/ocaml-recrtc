@@ -99,13 +99,14 @@ payload type**, which `lib/sdp` fixes at one per kind when it answers.
 Layering: `sdp` and `ice` are independent; `dtls` produces the SRTP keying
 material that `srtp` consumes; `srtp` depends on `rtp` for the header length,
 which is also where encryption starts, and on the sending side protects the
-keyframe requests `rtp` builds; `rtp` also holds the VP8, VP9 and H.264
+keyframe requests and receiver reports `rtp` builds; `rtp` also holds the VP8, VP9 and H.264
 payload formats and the timeline both containers measure against; `oggopus`
 takes the Opus packets out the far end, and `matroska` takes both, borrowing
 the Opus header from `oggopus`. `lib/ice/stun.ml` deliberately has no `Unix`
 dependency so the RFC vectors can drive it. `rtp` does depend on `unix`, for
-the jitter buffer's deadline alone; every function of it that reads the clock
-takes an optional `?now`, so the tests stay deterministic.
+the jitter buffer's deadline and the reception statistics' timings; every
+function of it that reads the clock takes an optional `?now`, so the tests stay
+deterministic.
 
 `Dtls.Server` is a pure state machine — `handle : t -> datagram -> datagram
 list * event` — which is what lets `test/dtls_harness.exe` and `src/recrtc.ml`
@@ -114,9 +115,10 @@ drive the same code. Keep it that way.
 Deliberate scope limits, all load-bearing: ICE-lite (we never send checks),
 `a=setup:passive` (so only the DTLS *server* side exists), one cipher suite,
 one SRTP profile, no application data over DTLS, one audio and one video
-stream per session. The only RTCP we send is a picture loss indication; there
-are no receiver reports, and the sender reports we receive are decrypted and
-thrown away.
+stream per session. The RTCP we send is a picture loss indication, and a
+receiver report with its CNAME once a second; of what a browser sends us only
+the sender report's NTP timestamp is read, which is what a report echoes back
+so that the browser can measure a round trip.
 
 ## Things that will bite you
 

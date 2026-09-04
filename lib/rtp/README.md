@@ -1,6 +1,6 @@
 # rtp
 
-RTP packets (RFC 3550), a jitter buffer, keyframe requests, the payload formats that carry video,
+RTP packets (RFC 3550), a jitter buffer, the RTCP a receiver sends back, the payload formats that carry video,
 and the timeline a container measures against. No dependencies; nothing here
 knows about sockets.
 
@@ -21,15 +21,38 @@ marker bit is masked off (RFC 5761 §4).
 
 ## rtcp.ml
 
-One packet, built rather than parsed: the picture loss indication of RFC 4585
-§6.3.1, twelve bytes naming our own source and the one whose pictures have
-become unreadable.
+What a recorder has to say back, built rather than parsed. The picture loss
+indication of RFC 4585 §6.3.1, twelve bytes naming our own source and the one
+whose pictures have become unreadable, because a browser sends a fresh keyframe
+only when asked and until one arrives every picture is predicted from a broken
+one. And the receiver report of RFC 3550 §6.4.2 with the CNAME chunk that must
+accompany it, because a sender that hears nothing about what arrived has
+nothing to size its bitrate against.
 
-Everything else a receiver may say is of no use here. A recorder cannot ask for
-a packet twice — by the time it noticed, the picture was already written off —
-and has no reason to slow a sender down. A keyframe request is the exception,
-because a browser sends a fresh keyframe only when asked, and until one arrives
-every picture is predicted from a broken one.
+Of what a browser sends us, `sender_reports` reads one field: the middle
+32 bits of each sender report's NTP timestamp. A report of ours echoes that
+back along with how long we sat on it, and the sender subtracts both from its
+own clock to get the round trip. The walk over a compound packet steps over
+anything it does not recognise rather than stopping, since a browser's compound
+packets carry a good deal we have no use for.
+
+There is still no negative acknowledgement. A recorder cannot use a packet
+twice — by the time it noticed the loss, the picture was already written off.
+
+## reception.ml
+
+The counting behind a report block: how many packets arrived, how many were
+expected, and the interarrival jitter of RFC 3550 §6.4.1.
+
+Two things are easy to get wrong here. The counting is of what came off the
+**wire, before the jitter buffer** — a packet the buffer later gave up on did
+arrive, and a report describes the network rather than what we managed to
+write. And the sequence number's wrapping is tracked here rather than borrowed
+from SRTP's rollover counter, because a packet SRTP refused never reached us
+and must not count as received.
+
+`report` is not a pure reading: the loss fraction is over the interval since
+the last one, so asking for a report starts a new interval.
 
 ## reorder.ml
 

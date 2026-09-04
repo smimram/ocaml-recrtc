@@ -6,7 +6,7 @@ confidentiality, an 80-bit HMAC-SHA1 tag for authentication.
 
 **Media travels one way**, so of RTP only the receiving half exists. Of RTCP
 there is also a protect side, `sender` and `protect_rtcp`, for the keyframe
-requests that are the one thing a recorder has to say back. It runs the same
+requests and receiver reports a recorder has to say back. It runs the same
 primitives the other way, counter mode being its own inverse, under the
 server's half of the exported keying material rather than the client's, and
 counts its own index up from zero — that index is what keeps two identical
