@@ -120,6 +120,36 @@ let run () =
   let other = Srtp.create ~master_key:(hex "FF" ^ String.sub key 1 15) ~master_salt:salt in
   check "another key does not authenticate"
     (Srtp.unprotect other (protect ~roc:1 ~sequence:300)
+    = Error Srtp.Authentication_failed);
+
+  suite "srtcp";
+  (* The sending half has no published vector of its own, so it is checked
+     against the receiving half, which does: the two derive the same session
+     keys from one master, and a browser's stack is on the other side of the
+     same agreement. *)
+  let sender = Srtp.sender ~master_key:key ~master_salt:salt in
+  let receiver = Srtp.create ~master_key:key ~master_salt:salt in
+  let pli = Rtp.Rtcp.pli ~sender:0x11223344l ~media:0xDEADBEEFl in
+  let protected = Srtp.protect_rtcp sender pli in
+  check "protecting adds the index and the tag"
+    (String.length protected = String.length pli + 4 + Srtp.tag_length);
+  check "the header travels in the clear"
+    (String.sub protected 0 8 = String.sub pli 0 8);
+  check "but the rest does not"
+    (String.sub protected 8 4 <> String.sub pli 8 4);
+  check "and comes back" (Srtp.unprotect_rtcp receiver protected = Ok pli);
+  check "the index moves on"
+    (match Srtp.unprotect_rtcp receiver (Srtp.protect_rtcp sender pli) with
+    | Ok packet -> packet = pli
+    | Error _ -> false);
+  (* Which is what keeps the counter blocks apart, and the replay window
+     working: the same packet protected twice is two different datagrams. *)
+  check "so the same packet twice is not a replay"
+    (Srtp.protect_rtcp sender pli <> Srtp.protect_rtcp sender pli);
+  let tampered = Bytes.of_string protected in
+  Bytes.set tampered 9 'X';
+  check "tampering is caught"
+    (Srtp.unprotect_rtcp receiver (Bytes.to_string tampered)
     = Error Srtp.Authentication_failed)
 
 let () =

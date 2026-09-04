@@ -47,6 +47,14 @@ let run () =
   check "giving up on 104" (push 108 = [ 105; 106; 107; 108 ]);
   check "the loss is counted" (Rtp.Reorder.lost buffer = 1);
   check "and the stream carries on" (push 109 = [ 109 ]);
+
+  suite "rtcp";
+  (* RFC 4585 §6.3.1: version 2, feedback message type 1, payload type 206,
+     two words of payload after the header word. *)
+  check_string "a picture loss indication"
+    ~expected:(hex "81CE0002 DEADBEEF 0000002A")
+    (Rtp.Rtcp.pli ~sender:0xDEADBEEFl ~media:42l);
+  check "which reads as RTCP" (Rtp.Packet.is_rtcp (Rtp.Rtcp.pli ~sender:1l ~media:2l));
   ()
 
 let () =

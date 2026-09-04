@@ -98,7 +98,8 @@ payload type**, which `lib/sdp` fixes at one per kind when it answers.
 
 Layering: `sdp` and `ice` are independent; `dtls` produces the SRTP keying
 material that `srtp` consumes; `srtp` depends on `rtp` for the header length,
-which is also where encryption starts; `rtp` also holds the VP8, VP9 and H.264
+which is also where encryption starts, and on the sending side protects the
+keyframe requests `rtp` builds; `rtp` also holds the VP8, VP9 and H.264
 payload formats and the timeline both containers measure against; `oggopus`
 takes the Opus packets out the far end, and `matroska` takes both, borrowing
 the Opus header from `oggopus`. `lib/ice/stun.ml` deliberately has no `Unix`
@@ -110,8 +111,10 @@ drive the same code. Keep it that way.
 
 Deliberate scope limits, all load-bearing: ICE-lite (we never send checks),
 `a=setup:passive` (so only the DTLS *server* side exists), one cipher suite,
-one SRTP profile, no application data over DTLS, no RTCP ever sent, one audio
-and one video stream per session.
+one SRTP profile, no application data over DTLS, one audio and one video
+stream per session. The only RTCP we send is a picture loss indication; there
+are no receiver reports, and the sender reports we receive are decrypted and
+thrown away.
 
 ## Things that will bite you
 
@@ -168,6 +171,16 @@ the right length and everything after it is still fine. A lost video packet
 does not shorten a picture, it corrupts it, and every frame predicted from it
 afterwards. `Rtp.Frame` therefore discards a frame with a sequence gap in it,
 and the recording does not start until the first keyframe.
+
+That is also why loss is answered with a keyframe request: a browser sends a
+fresh keyframe only when asked, so without one the corruption runs to the end
+of the recording. `request_keyframe` in `src/recrtc.ml` sends the PLI, at most
+one every `pli_interval`, and video stops being written until the keyframe
+arrives — or until `keyframe_timeout` passes, since a peer that ignores the
+request must not leave us recording nothing at all. Chromium's `outbound-rtp`
+statistics are where to look if this seems not to work: `pliCount` says whether
+our packets are arriving and being understood, and `keyFramesEncoded` whether
+they are being acted on.
 
 **Matroska lengths of all ones are reserved.** A variable-width integer whose
 value bits are all ones means "unknown", so each width holds one less than it

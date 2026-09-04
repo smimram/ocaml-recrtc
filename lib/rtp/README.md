@@ -1,6 +1,6 @@
 # rtp
 
-RTP packets (RFC 3550), a jitter buffer, the payload formats that carry video,
+RTP packets (RFC 3550), a jitter buffer, keyframe requests, the payload formats that carry video,
 and the timeline a container measures against. No dependencies; nothing here
 knows about sockets.
 
@@ -18,6 +18,18 @@ keystream and produces noise rather than an error.
 `is_rtcp` tells the two apart when they share a port, which they do whenever
 `a=rtcp-mux` is negotiated: RTCP's packet types all fall in 64..95 once the
 marker bit is masked off (RFC 5761 §4).
+
+## rtcp.ml
+
+One packet, built rather than parsed: the picture loss indication of RFC 4585
+§6.3.1, twelve bytes naming our own source and the one whose pictures have
+become unreadable.
+
+Everything else a receiver may say is of no use here. A recorder cannot ask for
+a packet twice — by the time it noticed, the picture was already written off —
+and has no reason to slow a sender down. A keyframe request is the exception,
+because a browser sends a fresh keyframe only when asked, and until one arrives
+every picture is predicted from a broken one.
 
 ## reorder.ml
 
@@ -103,4 +115,5 @@ carrying emulation-prevention bytes.
 
 `test.ml`: a packet with two CSRCs and a header extension, so the
 payload offset depends on both; then the buffer, through reordering, a
-duplicate, a late arrival, a gap that fills and a gap that never does.
+duplicate, a late arrival, a gap that fills and a gap that never does; then the
+bytes of a picture loss indication.

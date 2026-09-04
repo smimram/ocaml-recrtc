@@ -26,6 +26,7 @@ type codec = {
   clock_rate : int;
   channels : int;
   fmtp : string option;
+  pli : bool;
 }
 
 (** One media section of the offer, with the codec we chose to receive on it —
@@ -139,7 +140,19 @@ let get_all section name =
     (fun (n, v) -> if n = name then v else None)
     section.attributes
 
-let parse_rtpmap ~fmtps value =
+(* Whether a payload type was offered with picture loss indication among its
+   feedback (RFC 4585 §4.2). An answer may only use feedback the offer listed,
+   and a browser ignores what it did not itself propose. *)
+let offers_pli ~feedback pt =
+  List.exists
+    (fun line ->
+      match words line with
+      | pt' :: rest ->
+          pt' = pt && List.map String.lowercase_ascii rest = [ "nack"; "pli" ]
+      | [] -> false)
+    feedback
+
+let parse_rtpmap ~fmtps ~feedback value =
   (* "111 opus/48000/2" *)
   match words value with
   | [ pt; description ] -> (
@@ -162,6 +175,7 @@ let parse_rtpmap ~fmtps value =
               clock_rate = int_of_string_exn "clock rate" rate;
               channels = 1;
               fmtp;
+              pli = offers_pli ~feedback pt;
             }
       | [ name; rate; channels ] ->
           Some
@@ -171,6 +185,7 @@ let parse_rtpmap ~fmtps value =
               clock_rate = int_of_string_exn "clock rate" rate;
               channels = int_of_string_exn "channel count" channels;
               fmtp;
+              pli = offers_pli ~feedback pt;
             }
       | _ -> None)
   | _ -> None
@@ -193,7 +208,8 @@ let parse_fingerprint value =
 
 let codecs section =
   let fmtps = get_all section "fmtp" in
-  List.filter_map (parse_rtpmap ~fmtps) (get_all section "rtpmap")
+  let feedback = get_all section "rtcp-fb" in
+  List.filter_map (parse_rtpmap ~fmtps ~feedback) (get_all section "rtpmap")
 
 (* Encoding names are case-insensitive (RFC 4566 §6), and browsers disagree
    on the case they write: "opus" but "VP8". They are matched accordingly, and
@@ -356,6 +372,9 @@ let answer ~offer ~addresses ~port ~ice_ufrag ~ice_pwd ~fingerprint () =
              encoder, and an answer that changed them would be asking it to
              encode differently. *)
           Option.iter (fun fmtp -> line "a=fmtp:%d %s" pt fmtp) codec.fmtp;
+          (* The only feedback we send. Asking for it commits us to nothing:
+             what a receiver does not send, a sender simply never gets. *)
+          if codec.pli then line "a=rtcp-fb:%d nack pli" pt;
           List.iteri
             (fun rank address ->
               line "a=candidate:%d 1 udp %d %s %d typ host" (rank + 1)

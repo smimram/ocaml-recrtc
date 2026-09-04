@@ -17,6 +17,7 @@ type codec = {
   clock_rate : int;
   channels : int;
   fmtp : string option;
+  pli : bool;  (** whether [a=rtcp-fb] offered picture loss indication *)
 }
 
 (** One media section of the offer. [codec] is what we chose to receive on it,
