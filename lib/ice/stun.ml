@@ -368,14 +368,15 @@ let check_fingerprint message =
   | Some _, None | None, Some _ -> false
   | None, None -> true
 
+let create ~message_type ~transaction_id attributes =
+  { message_type; transaction_id; attributes; integrity_input = None; fingerprint_input = None }
+
+let message_type message = message.message_type
+let transaction_id message = message.transaction_id
+let attributes message = message.attributes
+
 let response ~message_type request attributes =
-  {
-    message_type;
-    transaction_id = request.transaction_id;
-    attributes;
-    integrity_input = None;
-    fingerprint_input = None;
-  }
+  create ~message_type ~transaction_id:request.transaction_id attributes
 
 (** The success response to a binding request, carrying the peer's reflexive
     address. *)

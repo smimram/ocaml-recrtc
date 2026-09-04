@@ -60,6 +60,10 @@ type session = {
   created : float;
 }
 
+(* The local ICE fragment names a session throughout: in the log, in the answer
+   and in the request that ends it. *)
+let ufrag session = (Ice.Agent.local session.ice).ufrag
+
 (* Sessions are found by the ICE fragment a STUN check carries, and by source
    address once a peer has been latched, since DTLS and RTP datagrams identify
    themselves in no other way. *)
@@ -106,7 +110,7 @@ let writer session packet =
       session.recording <- Some writer;
       session.recording_path <- path;
       log.info (fun log ->
-          log "session %s: recording to %s" session.ice.local.ufrag path);
+          log "session %s: recording to %s" (ufrag session) path);
       writer
 
 let write_packets session packets =
@@ -125,7 +129,7 @@ let stop_recording session =
       session.recording <- None;
       log.info (fun log ->
           log "session %s: recorded %.1fs to %s, %d packet(s) lost"
-            session.ice.local.ufrag
+            (ufrag session)
             (Oggopus.Writer.duration writer)
             session.recording_path
             (Rtp.Reorder.lost session.reorder))
@@ -152,23 +156,23 @@ let handle_offer request =
           created = Unix.gettimeofday ();
         }
       in
-      Hashtbl.replace sessions ice.local.ufrag session;
+      Hashtbl.replace sessions (Ice.Agent.local ice).ufrag session;
       let answer =
         Sdp.answer ~offer ~addresses:!advertised_ips ~port:!media_port
-          ~ice_ufrag:ice.local.ufrag ~ice_pwd:ice.local.pwd
+          ~ice_ufrag:(Ice.Agent.local ice).ufrag ~ice_pwd:(Ice.Agent.local ice).pwd
           ~fingerprint:("sha-256", (Lazy.force certificate).fingerprint)
           ()
       in
       log.info (fun log ->
           log "new session %s (peer ufrag %s, Opus on payload type %d)"
-            ice.local.ufrag offer.ice_ufrag offer.opus.payload_type);
+            (Ice.Agent.local ice).ufrag offer.ice_ufrag offer.opus.payload_type);
       Dream.respond
         ~headers:
           [
             ("Content-Type", "application/sdp");
             (* So that the page can ask for its own session to be closed
                rather than leaving it to the idle sweep. *)
-            (session_header, ice.local.ufrag);
+            (session_header, (Ice.Agent.local ice).ufrag);
           ]
         answer
 
@@ -182,7 +186,7 @@ let handle_stop request =
           log.info (fun log -> log "session %s: stopped by the client" ufrag);
           stop_recording session;
           Hashtbl.remove sessions ufrag;
-          Option.iter (Hashtbl.remove sessions_by_peer) session.ice.peer;
+          Option.iter (Hashtbl.remove sessions_by_peer) (Ice.Agent.peer session.ice);
           Dream.respond "")
 
 (* Media ------------------------------------------------------------------ *)
@@ -190,15 +194,15 @@ let handle_stop request =
 (* Keep the address table in step with the agent, which latches and re-latches
    the peer address as checks arrive. *)
 let track_peer session previous =
-  if session.ice.peer <> previous then begin
+  if Ice.Agent.peer session.ice <> previous then begin
     Option.iter (fun address -> Hashtbl.remove sessions_by_peer address) previous;
     Option.iter
       (fun address ->
         Hashtbl.replace sessions_by_peer address session;
         log.info (fun log ->
-            log "session %s latched onto %s" session.ice.local.ufrag
+            log "session %s latched onto %s" (ufrag session)
               (Ice.Agent.string_of_sockaddr address)))
-      session.ice.peer
+      (Ice.Agent.peer session.ice)
   end
 
 let send socket ~destination datagram =
@@ -229,7 +233,7 @@ let handle_stun socket ~source datagram =
             (Ice.Agent.string_of_sockaddr source));
       Lwt.return_unit
   | Some session -> (
-      let previous = session.ice.peer in
+      let previous = Ice.Agent.peer session.ice in
       match Ice.Agent.handle session.ice ~source datagram with
       | Ice.Agent.Drop reason ->
           log.debug (fun log -> log "dropped a check: %s" reason);
@@ -247,7 +251,7 @@ let handle_dtls socket ~source session datagram =
       (* A peer that closes the connection cleanly ends up here too, so this is
          also where a recording finishes when the browser hangs up. *)
       log.warning (fun log ->
-          log "session %s: DTLS ended: %s" session.ice.local.ufrag message);
+          log "session %s: DTLS ended: %s" (ufrag session) message);
       stop_recording session
   | Dtls.Server.Established { profile = _; keying } ->
       (* The handshake keeps reporting itself established as the peer repeats
@@ -261,7 +265,7 @@ let handle_dtls socket ~source session datagram =
                ~master_salt:keying.srtp_client_salt);
         log.info (fun log ->
             log "session %s: DTLS established, SRTP keys in hand"
-              session.ice.local.ufrag)
+              (ufrag session))
       end);
   Lwt.return_unit
 
@@ -279,7 +283,7 @@ let handle_media session datagram =
       (match unprotect datagram with
       | Error error ->
           log.warning (fun log ->
-              log "session %s: %s" session.ice.local.ufrag (Srtp.string_of_error error))
+              log "session %s: %s" (ufrag session) (Srtp.string_of_error error))
       | Ok packet when Rtp.Packet.is_rtcp datagram ->
           log.debug (fun log -> log "RTCP, %d bytes" (String.length packet))
       | Ok packet -> (
@@ -344,13 +348,13 @@ let rec reap_sessions () =
   let%lwt () = Lwt_unix.sleep 10. in
   let now = Unix.gettimeofday () in
   Hashtbl.iter
-    (fun ufrag session ->
+    (fun key session ->
       if not (Ice.Agent.alive session.ice) then begin
         log.info (fun log ->
-            log "forgetting session %s, idle, %.0fs old" ufrag (now -. session.created));
+            log "forgetting session %s, idle, %.0fs old" key (now -. session.created));
         stop_recording session;
-        Hashtbl.remove sessions ufrag;
-        Option.iter (Hashtbl.remove sessions_by_peer) session.ice.peer
+        Hashtbl.remove sessions key;
+        Option.iter (Hashtbl.remove sessions_by_peer) (Ice.Agent.peer session.ice)
       end)
     (Hashtbl.copy sessions);
   reap_sessions ()

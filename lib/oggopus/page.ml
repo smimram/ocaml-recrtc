@@ -5,7 +5,6 @@
     whose length is a multiple of 255 needs a trailing empty segment. *)
 
 let capture_pattern = "OggS"
-let header_length = 27
 let maximum_segments = 255
 let segment_length = 255
 

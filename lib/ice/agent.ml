@@ -39,6 +39,11 @@ let create ~remote =
     last_valid_check = Unix.gettimeofday ();
   }
 
+let local t = t.local
+let remote t = t.remote
+let peer t = t.peer
+let nominated t = t.nominated
+
 (* Addresses ------------------------------------------------------------- *)
 
 let address_of_sockaddr = function
@@ -69,7 +74,7 @@ let handle t ~source datagram =
   match Stun.decode datagram with
   | Error e -> Drop ("malformed STUN message: " ^ e)
   | Ok request -> (
-      match request.message_type with
+      match Stun.message_type request with
       (* We send no checks, so a response can only be stray or spoofed. *)
       | Stun.Binding_success | Stun.Binding_error ->
           Drop "unsolicited STUN response"
@@ -88,7 +93,7 @@ let handle t ~source datagram =
                controlled too is a role conflict (RFC 8445 §7.3.1.1). *)
             List.exists
               (function Stun.Ice_controlled _ -> true | _ -> false)
-              request.attributes
+              (Stun.attributes request)
           then error t request ~code:487 ~reason:"Role Conflict"
           else
             match address_of_sockaddr source with

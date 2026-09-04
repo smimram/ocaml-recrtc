@@ -112,8 +112,12 @@ inside an expression.
 
 **A stale server holds the port.** `dune exec` fails with `EADDRINUSE` and
 exits, leaving the *old* binary answering requests, so your changes seem to
-have no effect. Kill it first — but write the pattern so it cannot match the
-shell running it: `pkill -f '[r]ecrtc\.exe'`, not `pkill -f recrtc.exe`.
+have no effect. Kill it first — but `pkill -f` matches the shell running the
+command as readily as the server, and killing your own shell mid-script is a
+confusing way to find that out. The bracket trick (`pkill -f '[r]ecrtc\.exe'`)
+only helps when that pattern is the line's *only* mention of the binary; if the
+same command also runs `./_build/.../recrtc.exe`, the shell matches anyway.
+Kill by PID, or give the `pkill` a line of its own.
 
 **Log levels.** `Dream.sub_log` keeps the threshold in force when it was
 created, and the `log` value here is created at module initialisation, before
@@ -141,6 +145,11 @@ right length instead of pulling everything after it earlier.
   hand; do not add a `.ocamlformat` unless asked.
 - Comments explain *why*, and are worth spending words on where a protocol
   requires something non-obvious; cite the RFC and section when doing so.
+- Every module under `lib/` has an `.mli`, which is where its documentation
+  lives; the `.ml` keeps only the comments about how something is done.
+  `srtp.mli` ends with a "Primitives" section exposed for the published test
+  vectors — the rest of that library's internals, the rollover counter and
+  replay window among them, are reached through `unprotect` alone.
 - A library whose name matches one of its modules makes that module the only
   entry point, which is why `lib/ice` has `agent.ml` and `stun.ml` and no
   `ice.ml`.

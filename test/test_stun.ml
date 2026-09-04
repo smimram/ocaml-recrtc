@@ -49,7 +49,7 @@ let decode name message =
 
 (** Encoding then decoding must preserve the attributes and produce a message
     that authenticates under the same key. *)
-let round_trip name (message : Ice.Stun.t) =
+let round_trip name message =
   (* The integrity and fingerprint attributes are recomputed by the encoder, and
      cover the padding bytes, which we do not reproduce; only the attributes we
      supply can be compared. *)
@@ -58,11 +58,17 @@ let round_trip name (message : Ice.Stun.t) =
       | Ice.Stun.Message_integrity _ | Fingerprint _ -> false
       | _ -> true)
   in
-  let attributes = significant message.attributes in
-  let encoded = Ice.Stun.encode ~key:password { message with attributes } in
+  let attributes = significant (Ice.Stun.attributes message) in
+  let encoded =
+    Ice.Stun.encode ~key:password
+      (Ice.Stun.create
+         ~message_type:(Ice.Stun.message_type message)
+         ~transaction_id:(Ice.Stun.transaction_id message)
+         attributes)
+  in
   let decoded = decode (name ^ " re-encoded") encoded in
   check (name ^ ": round trip preserves attributes")
-    (significant decoded.attributes = attributes);
+    (significant (Ice.Stun.attributes decoded) = attributes);
   check (name ^ ": round trip integrity") (Ice.Stun.check_integrity ~key:password decoded);
   check (name ^ ": round trip fingerprint") (Ice.Stun.check_fingerprint decoded)
 
@@ -70,7 +76,7 @@ let run () =
   suite "stun";
 
   let m = decode "request" request in
-  check "request: type" (m.message_type = Ice.Stun.Binding_request);
+  check "request: type" (Ice.Stun.message_type m = Ice.Stun.Binding_request);
   check "request: username" (Ice.Stun.username m = Some "evtj:h6vY");
   check "request: priority" (Ice.Stun.priority m = Some 0x6e0001ffl);
   check "request: no use-candidate" (not (Ice.Stun.use_candidate m));
@@ -81,14 +87,14 @@ let run () =
   round_trip "request" m;
 
   let m = decode "IPv4 response" ipv4_response in
-  check "IPv4 response: type" (m.message_type = Ice.Stun.Binding_success);
+  check "IPv4 response: type" (Ice.Stun.message_type m = Ice.Stun.Binding_success);
   check "IPv4 response: address"
     (List.exists
        (function
          | Ice.Stun.Xor_mapped_address { ip; port } ->
              ip = hex "c0 00 02 01" && port = 32853
          | _ -> false)
-       m.attributes);
+       (Ice.Stun.attributes m));
   check "IPv4 response: integrity" (Ice.Stun.check_integrity ~key:password m);
   check "IPv4 response: fingerprint" (Ice.Stun.check_fingerprint m);
   round_trip "IPv4 response" m;
@@ -100,7 +106,7 @@ let run () =
          | Ice.Stun.Xor_mapped_address { ip; port } ->
              ip = hex "2001 0db8 1234 5678 0011 2233 4455 6677" && port = 32853
          | _ -> false)
-       m.attributes);
+       (Ice.Stun.attributes m));
   check "IPv6 response: integrity" (Ice.Stun.check_integrity ~key:password m);
   check "IPv6 response: fingerprint" (Ice.Stun.check_fingerprint m);
   round_trip "IPv6 response" m;

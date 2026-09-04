@@ -41,7 +41,6 @@ type negotiation = {
   client_random : string;
   server_random : string;
   ecdh_secret : Mirage_crypto_ec.P256.Dh.secret;
-  ecdh_public : string;
   extended_master_secret : bool;
   profile : int;
 }
@@ -65,7 +64,6 @@ type t = {
   mutable send_message_seq : int;
   mutable send_epoch : int;
   mutable send_sequence : int;
-  mutable receive_epoch : int;
   reassembly : (int, partial) Hashtbl.t;
   mutable read_cipher : Crypto.cipher option;
   mutable write_cipher : Crypto.cipher option;
@@ -84,7 +82,6 @@ let create config =
     send_message_seq = 0;
     send_epoch = 0;
     send_sequence = 0;
-    receive_epoch = 0;
     reassembly = Hashtbl.create 8;
     read_cipher = None;
     write_cipher = None;
@@ -210,7 +207,6 @@ let handle_client_hello t body =
       client_random = hello.random;
       server_random;
       ecdh_secret;
-      ecdh_public;
       extended_master_secret =
         Messages.offers hello Messages.Extension.extended_master_secret;
       profile;
@@ -374,7 +370,10 @@ let handle_record t (record : Record.t) =
          was lost, so send it again. *)
       if datagrams = [] && retransmission then t.last_flight else datagrams
   | Record.Change_cipher_spec ->
-      t.receive_epoch <- record.epoch + 1;
+      (* Nothing to record: the epoch a record belongs to is written on the
+         record, and everything past epoch zero is decrypted with the keys the
+         key exchange settled, which exist by now or the Finished will not
+         authenticate. *)
       []
   | Record.Alert when String.length record.fragment < 2 ->
       fail Record.Alert.decode_error "truncated alert"

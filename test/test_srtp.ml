@@ -54,21 +54,70 @@ let run () =
     (Srtp.counter ~salt:session_salt ~ssrc:0l ~index:1
     <> Srtp.counter ~salt:session_salt ~ssrc:0l ~index:0);
 
-  (* Rollover: a sequence number that wraps must be recognised as belonging to
-     the next rollover counter, and a straggler from before the wrap to the
-     previous one. *)
-  let stream = { Srtp.roc = 0; highest = 0; window = 0L; seen = false } in
-  let receive sequence =
-    let roc = Srtp.estimate_roc stream sequence in
-    let index_ = Srtp.index roc sequence in
-    let fresh = Srtp.fresh stream index_ in
-    if fresh then Srtp.remember stream ~roc ~sequence ~index_;
-    (roc, fresh)
+  (* Rollover and replay, exercised through unprotect: a packet is protected
+     here under a rollover counter the receiver is never told, so a wrong guess
+     on its part shows up as an authentication failure rather than as silently
+     wrong audio. *)
+  let key = hex "00112233445566778899AABBCCDDEEFF" in
+  let salt = hex "0102030405060708090A0B0C0D0E" in
+  let context = Srtp.create ~master_key:key ~master_salt:salt in
+  let keys =
+    {
+      Srtp.cipher =
+        Mirage_crypto.AES.CTR.of_secret
+          (Srtp.derive ~master_key:key ~master_salt:salt
+             ~label:Srtp.Label.rtp_encryption Srtp.key_length);
+      authentication =
+        Srtp.derive ~master_key:key ~master_salt:salt
+          ~label:Srtp.Label.rtp_authentication 20;
+      salt =
+        Srtp.derive ~master_key:key ~master_salt:salt ~label:Srtp.Label.rtp_salt
+          Srtp.salt_length;
+    }
   in
-  check "first packet" (receive 65534 = (0, true));
-  check "next packet" (receive 65535 = (0, true));
-  check "the sequence wraps" (receive 0 = (1, true));
-  check "and carries on" (receive 1 = (1, true));
-  check "a straggler from before the wrap" (fst (receive 65533) = 0);
-  check "a replay is refused" (receive 1 = (1, false));
-  check "the rollover counter is now one" (stream.roc = 1)
+  let ssrc = 0x11223344l in
+  let payload = "the payload" in
+  let protect ~roc ~sequence =
+    let header = Bytes.create 12 in
+    Bytes.set_uint8 header 0 0x80;
+    Bytes.set_uint8 header 1 111;
+    Bytes.set_uint16_be header 2 sequence;
+    Bytes.set_int32_be header 4 (Int32.of_int (sequence * 960));
+    Bytes.set_int32_be header 8 ssrc;
+    let header = Bytes.to_string header in
+    let index = (roc * 65536) + sequence in
+    let body = header ^ Srtp.cipher keys ~ssrc ~index ~data:payload in
+    let roll = Bytes.create 4 in
+    Bytes.set_int32_be roll 0 (Int32.of_int roc);
+    body ^ Srtp.authenticate ~key:keys.authentication (body ^ Bytes.to_string roll)
+  in
+  let receive ~roc ~sequence =
+    match Srtp.unprotect context (protect ~roc ~sequence) with
+    | Ok packet -> `Payload (Rtp.Packet.parse packet).payload
+    | Error e -> `Error e
+  in
+  check "a protected packet comes back" (receive ~roc:0 ~sequence:65534 = `Payload payload);
+  check "and the next one" (receive ~roc:0 ~sequence:65535 = `Payload payload);
+  (* The sequence wraps: the receiver must move to the next rollover counter
+     on its own, or the tag will not match. *)
+  check "the sequence wraps" (receive ~roc:1 ~sequence:0 = `Payload payload);
+  check "and carries on" (receive ~roc:1 ~sequence:1 = `Payload payload);
+  check "a replay is refused" (receive ~roc:1 ~sequence:1 = `Error Srtp.Replayed);
+  check "a straggler from before the wrap"
+    (receive ~roc:0 ~sequence:65533 = `Payload payload);
+  (* A packet whose rollover counter disagrees with what the receiver inferred
+     cannot authenticate. *)
+  check "a wrong rollover counter is caught"
+    (receive ~roc:7 ~sequence:100 = `Error Srtp.Authentication_failed);
+
+  let packet = Bytes.of_string (protect ~roc:1 ~sequence:200) in
+  Bytes.set packet 20 'X';
+  check "tampering is caught"
+    (Srtp.unprotect context (Bytes.to_string packet)
+    = Error Srtp.Authentication_failed);
+  check "a truncated packet is refused"
+    (Srtp.unprotect context "\x80\x6f\x00\x01" = Error Srtp.Too_short);
+  let other = Srtp.create ~master_key:(hex "FF" ^ String.sub key 1 15) ~master_salt:salt in
+  check "another key does not authenticate"
+    (Srtp.unprotect other (protect ~roc:1 ~sequence:300)
+    = Error Srtp.Authentication_failed)
