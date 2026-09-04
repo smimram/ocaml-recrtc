@@ -1,0 +1,4 @@
+(library
+ (name dtls)
+ (libraries digestif mirage-crypto mirage-crypto-ec mirage-crypto-rng ptime
+   ptime.clock.os tls x509))

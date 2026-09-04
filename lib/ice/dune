@@ -1,0 +1,3 @@
+(library
+ (name ice)
+ (libraries digestif ipaddr ipaddr.unix mirage-crypto-rng unix))
