@@ -46,6 +46,9 @@ their first byte (RFC 7983).
 | `src` | the HTTP server, the media socket and the sessions |
 | `static` | the page and its script |
 
+Each library under `lib/` has a README of its own, covering what it implements,
+what it deliberately does not, and how it is checked.
+
 ## Testing
 
 `make test` runs the published vectors the delicate parts stand on: RFC 5769

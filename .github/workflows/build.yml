@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: "5.3"
+          # There is no opam file to pin dependencies against, so the cache
+          # would never be invalidated when the list below changes.
+          cache-prefix: recrtc-1
+
+      # No package definition: install what the dune files ask for.
+      - run: >
+          opam install --yes
+          dune dream digestif ipaddr lwt lwt_ppx mirage-crypto mirage-crypto-ec
+          mirage-crypto-rng ptime tls x509
+
+      - run: opam exec -- dune build
+
+      - run: opam exec -- dune test --force
