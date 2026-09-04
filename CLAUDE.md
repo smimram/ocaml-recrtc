@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`recrtc` records what a browser sends over WebRTC — Opus audio, and VP8 or
-H.264 video — as an Ogg/Opus or Matroska file. The WebRTC transport stack is
+`recrtc` records what a browser sends over WebRTC — Opus audio, and VP8, VP9
+or H.264 video — as an Ogg/Opus or Matroska file. The WebRTC transport stack is
 implemented here because none of it exists in opam: `tls` has no DTLS, and
 there is no STUN, ICE, SRTP or SDP package. `README.md` describes the result;
 this file is about working on it.
@@ -58,9 +58,9 @@ chromium --headless=new --no-sandbox --use-fake-ui-for-media-stream \
 ```
 
 The `?autostart` hook in `static/recrtc.js` exists for exactly this; `&audio`
-records audio alone, and `&codec=h264` narrows the offer through
-`setCodecPreferences` so the other video path can be reached, since a browser
-otherwise always picks VP8 from what we accept.
+records audio alone, and `&codec=vp9` or `&codec=h264` narrows the offer
+through `setCodecPreferences` so the other video paths can be reached, since a
+browser otherwise always picks VP8 from what we accept.
 
 Chromium's fake device sounds a steady tone (400 Hz in current builds, not the
 440 Hz older notes claim — measure, do not assume) and draws a rolling disc
@@ -92,7 +92,7 @@ payload type**, which `lib/sdp` fixes at one per kind when it answers.
 
 Layering: `sdp` and `ice` are independent; `dtls` produces the SRTP keying
 material that `srtp` consumes; `srtp` depends on `rtp` for the header length,
-which is also where encryption starts; `rtp` also holds the VP8 and H.264
+which is also where encryption starts; `rtp` also holds the VP8, VP9 and H.264
 payload formats and the timeline both containers measure against; `oggopus`
 takes the Opus packets out the far end, and `matroska` takes both, borrowing
 the Opus header from `oggopus`. `lib/ice/stun.ml` deliberately has no `Unix`

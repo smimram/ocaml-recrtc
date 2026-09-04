@@ -3,7 +3,7 @@
     Frames and packets are stored exactly as they arrived: nothing is decoded
     or re-encoded, which is why the muxing is done here rather than through a
     library that would want samples rather than bytes. Matroska is the only
-    container that will hold what a browser sends — VP8 or H.264 pictures
+    container that will hold what a browser sends — VP8, VP9 or H.264 pictures
     beside Opus packets — without touching either.
 
     {1 Synchronisation}
@@ -19,6 +19,7 @@
 
 type codec =
   | Vp8
+  | Vp9
   | H264 of string  (** the [avcC] configuration record, from {!Rtp.H264.avcc} *)
 
 val extension : codec -> string

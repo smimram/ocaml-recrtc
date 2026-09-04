@@ -35,13 +35,13 @@ by payload type.
   arrive, nothing is decoded or re-encoded. For audio the RTP timestamp is the
   granule position Ogg wants, so a lost packet leaves a gap of the right length
   rather than shifting the sound.
-- Video is VP8 or H.264, reassembled from the packets it was cut into. A
+- Video is VP8, VP9 or H.264, reassembled from the packets it was cut into. A
   picture missing a packet is dropped whole rather than written short: unlike
   an audio gap, a partial picture corrupts every frame predicted from it.
   Recording starts at the first keyframe, so the file opens on a picture that
   decodes on its own.
-- Audio alone goes to Ogg. With video it goes to Matroska — `.webm` for VP8,
-  `.mkv` for H.264, whose codec WebM's `DocType` does not admit.
+- Audio alone goes to Ogg. With video it goes to Matroska — `.webm` for VP8
+  and VP9, `.mkv` for H.264, whose codec WebM's `DocType` does not admit.
 
 ## Layout
 
@@ -51,7 +51,7 @@ by payload type.
 | `lib/ice` | STUN codec (RFC 5389) and an ICE-lite agent (RFC 8445) |
 | `lib/dtls` | a DTLS 1.2 server (RFC 6347) exporting SRTP keys (RFC 5764) |
 | `lib/srtp` | unprotecting SRTP and SRTCP (RFC 3711) |
-| `lib/rtp` | RTP packets, a jitter buffer, VP8 and H.264 payload formats |
+| `lib/rtp` | RTP packets, a jitter buffer, VP8, VP9 and H.264 payload formats |
 | `lib/oggopus` | writing Ogg pages and an Opus stream (RFC 7845) |
 | `lib/matroska` | writing EBML and a Matroska file (RFC 9559) |
 | `src` | the HTTP server, the media socket and the sessions |
@@ -64,7 +64,7 @@ what it deliberately does not, and how it is checked.
 
 `make test` runs the published vectors the delicate parts stand on: RFC 5769
 for STUN, RFC 3711 appendix B for the SRTP key derivation and keystream, plus
-the RTP, jitter-buffer, Opus framing, VP8, H.264 and EBML logic.
+the RTP, jitter-buffer, Opus framing, VP8, VP9, H.264 and EBML logic.
 
 The DTLS server can be exercised on its own against another implementation:
 

@@ -1,6 +1,6 @@
 (test
  (name test_recrtc)
- (modules test_recrtc testlib test_stun test_srtp test_rtp test_vp8 test_h264
+ (modules test_recrtc testlib test_stun test_srtp test_rtp test_vp8 test_vp9 test_h264
    test_matroska)
  (libraries ice matroska mirage-crypto oggopus rtp sdp srtp))
 

@@ -29,10 +29,12 @@ forward error correction each take a payload type of their own, and a browser
 offers every video codec it has. **One codec is chosen per section**, and that
 is what lets the media loop filter on the payload type alone.
 
-Audio is Opus. Video is VP8 by preference, else H.264 — and then only the
-payload type whose `a=fmtp` says `packetization-mode=1`, since mode 0 cannot
-fragment a picture across datagrams and would silently drop every frame larger
-than an MTU (RFC 6184 §6.2).
+Audio is Opus. Video is VP8 by preference, then VP9, else H.264 — and for
+H.264 only the payload type whose `a=fmtp` says `packetization-mode=1`, since
+mode 0 cannot fragment a picture across datagrams and would silently drop every
+frame larger than an MTU (RFC 6184 §6.2). A browser offers all three and always
+puts VP8 first, so reaching either of the others means narrowing the offer with
+`setCodecPreferences`.
 
 **Encoding names are matched case-insensitively and echoed back exactly as the
 offer spelled them** (RFC 4566 §6). A browser writes `opus` but `VP8`, and

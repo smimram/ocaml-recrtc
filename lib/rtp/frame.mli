@@ -8,14 +8,14 @@
     audio gap, a partial picture is not a shorter picture but a corrupt one,
     and it would corrupt every frame predicted from it as well. *)
 
-type codec = Vp8 | H264
+type codec = Vp8 | Vp9 | H264
 
 type frame = {
   timestamp : int32;
   keyframe : bool;  (** decodable without any frame before it *)
   data : string;
-      (** ready for a container: the VP8 partitions concatenated, or the H.264
-          units each behind its four-byte length *)
+      (** ready for a container: the VP8 or VP9 payloads concatenated, or the
+          H.264 units each behind its four-byte length *)
 }
 
 type t
@@ -36,7 +36,8 @@ val dimensions : t -> (int * int) option
 
 val parameter_sets : t -> (string * string) option
 (** For H.264, the first sequence and picture parameter sets seen, which a
-    container stores out of band. Always [None] for VP8, which needs none. *)
+    container stores out of band. Always [None] for VP8 and VP9, which need
+    none. *)
 
 val dropped : t -> int
 (** How many frames were discarded for arriving incomplete. *)

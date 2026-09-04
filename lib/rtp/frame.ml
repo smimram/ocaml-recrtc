@@ -1,4 +1,4 @@
-type codec = Vp8 | H264
+type codec = Vp8 | Vp9 | H264
 
 type frame = { timestamp : int32; keyframe : bool; data : string }
 
@@ -43,6 +43,7 @@ let parameter_sets t =
 let starts_frame t payload =
   match t.codec with
   | Vp8 -> Vp8.starts_frame payload
+  | Vp9 -> Vp9.starts_frame payload
   | H264 -> H264.starts_unit payload
 
 (* What a payload adds to the picture being assembled. *)
@@ -52,6 +53,10 @@ let append t pending payload =
       match Vp8.partition payload with
       | exception Vp8.Invalid _ -> pending.damaged <- true
       | partition -> Buffer.add_string pending.data partition)
+  | Vp9 -> (
+      match Vp9.payload payload with
+      | exception Vp9.Invalid _ -> pending.damaged <- true
+      | data -> Buffer.add_string pending.data data)
   | H264 ->
       List.iter
         (fun nal ->
@@ -84,10 +89,18 @@ let finish t =
       end
       else
         let keyframe =
-          match t.codec with Vp8 -> Vp8.keyframe data | H264 -> pending.keyframe
+          match t.codec with
+          | Vp8 -> Vp8.keyframe data
+          | Vp9 -> Vp9.keyframe data
+          | H264 -> pending.keyframe
         in
-        if keyframe && t.dimensions = None && t.codec = Vp8 then
-          t.dimensions <- Vp8.dimensions data;
+        (* H.264 is the exception: its size comes out of a parameter set as it
+           goes by, not out of the picture. *)
+        if keyframe && t.dimensions = None then
+          (match t.codec with
+          | Vp8 -> t.dimensions <- Vp8.dimensions data
+          | Vp9 -> t.dimensions <- Vp9.dimensions data
+          | H264 -> ());
         [ { timestamp = pending.timestamp; keyframe; data } ]
 
 let push t (packet : Packet.t) =

@@ -3,6 +3,7 @@ let () =
   Test_srtp.run ();
   Test_rtp.run ();
   Test_vp8.run ();
+  Test_vp9.run ();
   Test_h264.run ();
   Test_matroska.run ();
   Testlib.exit_status ()

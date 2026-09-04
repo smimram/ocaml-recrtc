@@ -65,7 +65,7 @@ async function start() {
 
 // The browser offers every video codec it has and the server takes the first
 // it knows, which is VP8. Narrowing the offer is the only way to reach the
-// other path: http://localhost:8080/?autostart&codec=h264
+// others: http://localhost:8080/?autostart&codec=vp9 (or h264)
 function prefer(transceiver) {
   const wanted = parameters.get("codec");
   if (!wanted || !transceiver.setCodecPreferences) return;

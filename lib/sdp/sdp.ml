@@ -214,14 +214,19 @@ let fragmentable codec =
         (fun parameter -> String.trim parameter = "packetization-mode=1")
         (String.split_on_char ';' fmtp)
 
+(* VP8 first because it is what a browser offers first and what every player
+   reads; VP9 next; H.264 last, since it is the only one whose container needs
+   a parameter set before the file can be opened. A browser is narrowed to one
+   of the others through setCodecPreferences. *)
 let choose_video codecs =
   match first_named codecs "vp8" with
   | Some vp8 -> Some vp8
   | None -> (
-      let h264 = List.filter (fun c -> named c "h264") codecs in
-      match List.find_opt fragmentable h264 with
-      | Some codec -> Some codec
-      | None -> None)
+      match first_named codecs "vp9" with
+      | Some vp9 -> Some vp9
+      | None ->
+          let h264 = List.filter (fun c -> named c "h264") codecs in
+          List.find_opt fragmentable h264)
 
 let choose section =
   let codecs = codecs section in
@@ -257,8 +262,8 @@ let parse_offer sdp =
   in
   if not (List.exists (fun m -> m.codec <> None) media) then
     invalid
-      "the offer proposes nothing we can receive: Opus for audio, VP8 or \
-       H.264 for video";
+      "the offer proposes nothing we can receive: Opus for audio, VP8, VP9 \
+       or H.264 for video";
   {
     media;
     ice_ufrag = require transport "ice-ufrag";

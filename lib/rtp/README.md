@@ -47,16 +47,27 @@ The rule for telling the two apart: a *small* step backwards is a packet out of
 order, a *large* one is the clock wrapping. Both `oggopus` and `matroska`
 measure against this, which is why it lives here rather than in either.
 
-## vp8.ml and h264.ml
+## vp8.ml, vp9.ml and h264.ml
 
-The two payload formats (RFC 7741 and RFC 6184). Both exist to undo what the
-transport did to a picture and hand back exactly the bytes the encoder
-produced.
+The three payload formats (RFC 7741, draft-ietf-payload-vp9-16 and RFC 6184).
+All exist to undo what the transport did to a picture and hand back exactly the
+bytes the encoder produced.
 
 VP8 puts a descriptor of one to six bytes in front of every payload; it is a
 transport artefact and does not belong in a file, so it is stripped and the
 partitions concatenated. A keyframe then declares its own size in the
 uncompressed header behind the `9d 01 2a` start code (RFC 6386 §9.1).
+
+VP9 is the same idea with a descriptor that varies far more: the picture
+identifier, the layer indices, the reference differences of flexible mode and a
+whole scalability structure are each optional, and the structure's own length
+depends on how many spatial layers and picture-group entries it describes.
+Nothing in it is read beyond `B`, which says where a frame begins, and its
+total length. The size comes from the frame instead, out of the uncompressed
+header behind the `49 83 42` sync code — reached by reading past a colour
+section whose length depends on the profile and on the colour space (VP9
+bitstream specification §6.2). A keyframe is exactly the frame whose header
+parses that far, so the same code answers both questions.
 
 H.264 is more work. A unit small enough for a datagram is the packet; several
 small ones arrive aggregated behind their lengths; one too large arrives in
@@ -84,9 +95,10 @@ picture partway through, discards the whole frame and counts it.
 
 ## Testing
 
-`test/test_vp8.ml` and `test/test_h264.ml` cover the descriptors, the
-fragmenting, and the picture size read back out of a keyframe and out of two
-real parameter sets — one baseline and one high profile, both cropped, both
+`test/test_vp8.ml`, `test/test_vp9.ml` and `test/test_h264.ml` cover the
+descriptors — including the ones a browser actually sends, and the scalability
+structure — the fragmenting, and the picture size read back out of a keyframe
+and out of two real parameter sets — one baseline and one high profile, both cropped, both
 carrying emulation-prevention bytes.
 
 `test/test_rtp.ml`: a packet with two CSRCs and a header extension, so the

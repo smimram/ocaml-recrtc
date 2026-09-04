@@ -35,10 +35,10 @@ module Id = struct
   let simple_block = 0xa3
 end
 
-type codec = Vp8 | H264 of string
+type codec = Vp8 | Vp9 | H264 of string
 
-let extension = function Vp8 -> ".webm" | H264 _ -> ".mkv"
-let doc_type = function Vp8 -> "webm" | H264 _ -> "matroska"
+let extension = function Vp8 | Vp9 -> ".webm" | H264 _ -> ".mkv"
+let doc_type = function Vp8 | Vp9 -> "webm" | H264 _ -> "matroska"
 
 let video_track = 1
 let audio_track = 2
@@ -125,10 +125,13 @@ let video_entry ~codec ~width ~height =
        (* Lacing packs several frames into one block; nothing here does. *)
        Ebml.uint Id.flag_lacing 0;
        Ebml.string Id.codec_id
-         (match codec with Vp8 -> "V_VP8" | H264 _ -> "V_MPEG4/ISO/AVC");
+         (match codec with
+         | Vp8 -> "V_VP8"
+         | Vp9 -> "V_VP9"
+         | H264 _ -> "V_MPEG4/ISO/AVC");
      ]
     @ (match codec with
-      | Vp8 -> []
+      | Vp8 | Vp9 -> []
       | H264 avcc -> [ Ebml.binary Id.codec_private avcc ])
     @ [
         Ebml.master Id.video

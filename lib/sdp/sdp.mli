@@ -52,7 +52,7 @@ exception Invalid of string
 val parse_offer : string -> offer
 (** @raise Invalid
       if the offer is malformed, or proposes nothing we can receive: Opus for
-      audio, VP8 or H.264 for video. *)
+      audio, VP8, VP9 or H.264 for video. *)
 
 val answer :
   offer:offer ->

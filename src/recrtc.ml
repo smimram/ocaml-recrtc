@@ -155,6 +155,7 @@ let ogg session packet =
 let matroska_codec video =
   match video.format with
   | Rtp.Frame.Vp8 -> Some Matroska.Writer.Vp8
+  | Rtp.Frame.Vp9 -> Some Matroska.Writer.Vp9
   | Rtp.Frame.H264 -> (
       match Rtp.Frame.parameter_sets video.frames with
       | Some (sps, pps) -> Some (Matroska.Writer.H264 (Rtp.H264.avcc ~sps ~pps))
@@ -190,7 +191,10 @@ let open_matroska ?(force = false) session video =
       opened session path;
       log.info (fun log ->
           log "session %s: %s %dx%d%s" (ufrag session)
-            (match codec with Matroska.Writer.Vp8 -> "VP8" | _ -> "H.264")
+            (match codec with
+            | Matroska.Writer.Vp8 -> "VP8"
+            | Matroska.Writer.Vp9 -> "VP9"
+            | Matroska.Writer.H264 _ -> "H.264")
             width height
             (match session.audio_channels with
             | Some channels -> Printf.sprintf ", Opus on %d channel(s)" channels
@@ -360,6 +364,7 @@ let handle_offer request =
                 })
               (match String.lowercase_ascii codec.name with
               | "vp8" -> Some Rtp.Frame.Vp8
+              | "vp9" -> Some Rtp.Frame.Vp9
               | "h264" -> Some Rtp.Frame.H264
               | _ -> None))
       in
@@ -399,6 +404,7 @@ let handle_offer request =
                     describe "Opus" (Option.map (fun a -> a.audio_codec) audio);
                     describe
                       (match video with
+                      | Some { format = Rtp.Frame.Vp9; _ } -> "VP9"
                       | Some { format = Rtp.Frame.H264; _ } -> "H.264"
                       | _ -> "VP8")
                       (Option.map (fun v -> v.video_codec) video);

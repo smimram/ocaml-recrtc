@@ -12,8 +12,8 @@ arrived**. The browser has already encoded the pictures and the sound, and
 routing them through a library that wants raw samples would mean decoding both
 and encoding them again, to produce a file whose contents we already hold.
 
-Matroska is the only container that will take what a browser sends — VP8 or
-H.264 pictures beside Opus packets — without touching either. WebM is the same
+Matroska is the only container that will take what a browser sends — VP8, VP9
+or H.264 pictures beside Opus packets — without touching either. WebM is the same
 format with a narrower declared `DocType`, and admits only VP8 and VP9; an
 H.264 recording is therefore written as plain Matroska, under `.mkv`. Nothing
 else about the two files differs.
