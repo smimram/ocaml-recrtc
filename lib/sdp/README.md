@@ -3,33 +3,59 @@
 Parsing the offer a browser sends and generating the answer to it
 (RFC 4566, RFC 8866, with the WebRTC attributes of RFC 8829).
 
-Deliberately partial. There is exactly one shape of session this server ever
-sees — a single audio track a browser wants to send — so the parser looks for
-the attributes it needs and ignores the rest, rather than modelling SDP. It
-does not round-trip: what comes back out is an answer built from scratch, not
-the offer amended.
+Deliberately partial. There is one shape of session this server ever sees — a
+microphone and a camera a browser wants to send — so the parser looks for the
+attributes it needs and ignores the rest, rather than modelling SDP. It does
+not round-trip: what comes back out is an answer built from scratch, not the
+offer amended.
 
 ## The offer
 
-Everything the rest of the server needs comes back in one record: the media
-identifier, the Opus payload type and its `a=fmtp` parameters, the peer's ICE
+Everything the rest of the server needs comes back in one record: a list of
+media sections, and the transport parameters they share — the peer's ICE
 credentials, the fingerprint of the certificate it will present, and whether it
-asked for `a=rtcp-mux`.
+asked for `a=rtcp-mux`. Those are read from the first section that carries
+them, because under BUNDLE every section agrees on them.
 
-Session-level attributes are folded into the media description, media level
+Session-level attributes are folded into each media description, media level
 winning, so a browser that puts `a=ice-ufrag` in either place is read the same
-way. An offer with no Opus, or with more than one audio section, is rejected
-with `Invalid` rather than half-understood.
+way. An offer proposing nothing we can receive is rejected with `Invalid`
+rather than half-understood.
+
+## Choosing a codec
+
+A section lists far more than the stream itself. Retransmission, redundancy and
+forward error correction each take a payload type of their own, and a browser
+offers every video codec it has. **One codec is chosen per section**, and that
+is what lets the media loop filter on the payload type alone.
+
+Audio is Opus. Video is VP8 by preference, else H.264 — and then only the
+payload type whose `a=fmtp` says `packetization-mode=1`, since mode 0 cannot
+fragment a picture across datagrams and would silently drop every frame larger
+than an MTU (RFC 6184 §6.2).
+
+**Encoding names are matched case-insensitively and echoed back exactly as the
+offer spelled them** (RFC 4566 §6). A browser writes `opus` but `VP8`, and
+answering `vp8` where it offered `VP8` is enough to make Chrome negotiate the
+section, report it active, and then never start its encoder — no error
+anywhere, just a video track that sends nothing. It cost an afternoon.
 
 ## The answer
 
 ```
 a=ice-lite            we answer checks and never send any
+a=group:BUNDLE 0 1    every accepted section on one transport
 a=setup:passive       the browser is the DTLS client
 a=recvonly            we receive; the offer said sendonly
 a=rtcp-mux            RTCP shares the media port
 a=candidate:…         one per address, most preferred first
 ```
+
+**The answer has one section per section of the offer, in the same order.**
+That correspondence is how the two sides agree on what each section is about
+(RFC 3264 §6), so a section we cannot use is not left out but echoed back with
+a port of zero and `a=inactive`. Only the sections we accepted are named in the
+`BUNDLE` group.
 
 The candidate list is the part worth explaining. A peer pairs its own
 candidates with ours by route, and a browser gathers no loopback candidate of
@@ -41,7 +67,8 @@ preference counting down from the address we would rather be reached on
 
 The `a=fmtp` line is echoed back unchanged. Those are the parameters the
 browser chose for its own encoder, and we are in no position to argue with
-them.
+them. The `a=rtcp-fb` lines are not echoed at all: we send no RTCP, so asking
+for feedback we will never provide would only be a lie.
 
 ## Testing
 

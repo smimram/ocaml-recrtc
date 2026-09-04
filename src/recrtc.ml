@@ -1,4 +1,4 @@
-(** A web server that records the audio a browser sends it over WebRTC.
+(** A web server that records what a browser sends it over WebRTC.
 
     Signalling is a plain HTTP exchange of SDP; media arrives on a single UDP
     socket shared by every session, on which STUN, DTLS and SRTP are
@@ -48,15 +48,46 @@ let primary_address () =
    one on this machine can use either. *)
 let default_addresses () = primary_address () @ [ "127.0.0.1" ]
 
+(* What we chose to receive on each kind of media, and the state that turns
+   its packets back into something a file can hold. *)
+type audio = {
+  audio_codec : Sdp.codec;
+  (* The network may reorder packets; the file may not. *)
+  audio_reorder : (int32 * string) Rtp.Reorder.t;
+}
+
+type video = {
+  video_codec : Sdp.codec;
+  format : Rtp.Frame.codec;
+  (* One picture is routinely thirty packets, so the buffer has to be far
+     deeper than audio's to absorb the same amount of reordering. *)
+  video_reorder : Rtp.Packet.t Rtp.Reorder.t;
+  frames : Rtp.Frame.t;
+  (* Everything before the first keyframe is dropped, so that the recording
+     opens on a picture that can be decoded on its own. *)
+  mutable started : bool;
+}
+
+type container = Ogg of Oggopus.Writer.t | Matroska of Matroska.Writer.t
+
+(* Media that arrived before the file could be opened. A Matroska file declares
+   the picture size and the channel count in its header, and neither is known
+   until the first keyframe and the first Opus packet have arrived. *)
+type buffered = Buffered_audio of int32 * string | Buffered_video of Rtp.Frame.frame
+
 type session = {
   ice : Ice.Agent.t;
-  offer : Sdp.offer;
   dtls : Dtls.Server.t;
   mutable srtp : Srtp.t option;
-  mutable recording : Oggopus.Writer.t option;
+  audio : audio option;
+  (* Cleared if the camera never produces a picture, so that a session that
+     offered video but sends none still leaves a recording of its audio. *)
+  mutable video : video option;
+  mutable recording : container option;
   mutable recording_path : string;
-  (* The network may reorder packets; the file may not. *)
-  reorder : (int32 * string) Rtp.Reorder.t;
+  mutable pending : (float * buffered) list;  (* newest first *)
+  mutable buffering_since : float option;
+  mutable audio_channels : int option;
   created : float;
 }
 
@@ -80,7 +111,7 @@ let session_header = "X-Recrtc-Session"
 
 (* Recording --------------------------------------------------------------- *)
 
-let recording_path () =
+let recording_path extension =
   let now = Unix.localtime (Unix.gettimeofday ()) in
   let stamp =
     Printf.sprintf "%s-%04d%02d%02d-%02d%02d%02d" !output_prefix
@@ -91,68 +122,259 @@ let recording_path () =
      the other. *)
   let rec free n =
     let path =
-      if n = 1 then stamp ^ ".opus" else Printf.sprintf "%s-%d.opus" stamp n
+      if n = 1 then stamp ^ extension
+      else Printf.sprintf "%s-%d%s" stamp n extension
     in
     if Sys.file_exists path then free (n + 1) else path
   in
   free 1
 
-(* The file is opened on the first packet: its header describes the stream, and
-   until a packet has arrived there is nothing to describe. *)
-let writer session packet =
+let opened session path =
+  session.recording_path <- path;
+  log.info (fun log -> log "session %s: recording to %s" (ufrag session) path)
+
+(* Audio alone goes to an Ogg file, as it always has; the container is only
+   opened on the first packet, since until one has arrived there is nothing to
+   describe in its header. *)
+let ogg session packet =
   match session.recording with
-  | Some writer -> writer
+  | Some (Ogg writer) -> Some writer
+  | Some (Matroska _) -> None
   | None ->
-      let path = recording_path () in
+      let path = recording_path ".opus" in
       let writer =
         Oggopus.Writer.create ~channels:(Oggopus.Writer.channels packet) path
       in
-      session.recording <- Some writer;
-      session.recording_path <- path;
-      log.info (fun log ->
-          log "session %s: recording to %s" (ufrag session) path);
-      writer
+      session.recording <- Some (Ogg writer);
+      opened session path;
+      Some writer
 
-let write_packets session packets =
-  List.iter
-    (fun (timestamp, payload) ->
-      Oggopus.Writer.write (writer session payload) ~timestamp payload)
-    packets
+(* The video half of the Matroska header. H.264 keeps its parameter sets out of
+   band, so the file cannot be opened until they have been seen — which is the
+   same keyframe that gives us the picture size. *)
+let matroska_codec video =
+  match video.format with
+  | Rtp.Frame.Vp8 -> Some Matroska.Writer.Vp8
+  | Rtp.Frame.H264 -> (
+      match Rtp.Frame.parameter_sets video.frames with
+      | Some (sps, pps) -> Some (Matroska.Writer.H264 (Rtp.H264.avcc ~sps ~pps))
+      | None -> None)
+
+(* How long the header waits for a track that has been negotiated but has not
+   yet produced a packet, before going ahead without it. *)
+let header_timeout = 2.
+
+let buffered_for session =
+  match session.buffering_since with
+  | Some since -> Unix.gettimeofday () -. since
+  | None -> 0.
+
+let waiting_for_audio session =
+  session.audio <> None
+  && session.audio_channels = None
+  && buffered_for session < header_timeout
+
+(* [force] gives up waiting for a track that has not appeared: for the end of a
+   session, where there is no more waiting to be done. *)
+let open_matroska ?(force = false) session video =
+  match (matroska_codec video, Rtp.Frame.dimensions video.frames) with
+  | Some codec, Some (width, height)
+    when session.recording = None && (force || not (waiting_for_audio session))
+    ->
+      let path = recording_path (Matroska.Writer.extension codec) in
+      let writer =
+        Matroska.Writer.create ~codec ~width ~height
+          ?audio_channels:session.audio_channels path
+      in
+      session.recording <- Some (Matroska writer);
+      opened session path;
+      log.info (fun log ->
+          log "session %s: %s %dx%d%s" (ufrag session)
+            (match codec with Matroska.Writer.Vp8 -> "VP8" | _ -> "H.264")
+            width height
+            (match session.audio_channels with
+            | Some channels -> Printf.sprintf ", Opus on %d channel(s)" channels
+            | None -> ", no audio"));
+      (* Whatever arrived while the header was still unknown belongs in the
+         file, in the order it arrived. *)
+      let pending = List.rev session.pending in
+      session.pending <- [];
+      session.buffering_since <- None;
+      List.iter
+        (fun (arrival, item) ->
+          match item with
+          | Buffered_audio (timestamp, packet) ->
+              Matroska.Writer.write_audio writer ~arrival ~timestamp packet
+          | Buffered_video { Rtp.Frame.timestamp; keyframe; data } ->
+              Matroska.Writer.write_video writer ~arrival ~timestamp ~keyframe data)
+        pending;
+      Some writer
+  | _ -> None
+
+(* How long a session that negotiated video waits for a picture before
+   concluding there will not be one. Chrome sends a keyframe within a few
+   frames of the connection opening, so silence this long means the camera
+   never started. *)
+let video_timeout = 5.
+
+let rec write_audio session ~timestamp packet =
+  if session.audio_channels = None then
+    session.audio_channels <- Some (Oggopus.Writer.channels packet);
+  match (session.recording, session.video) with
+  | Some (Matroska writer), _ ->
+      Matroska.Writer.write_audio writer ~arrival:(Unix.gettimeofday ())
+        ~timestamp packet
+  | _, Some _ -> buffer session (Buffered_audio (timestamp, packet))
+  | _, None -> (
+      match ogg session packet with
+      | Some writer -> Oggopus.Writer.write writer ~timestamp packet
+      | None -> ())
+
+(* A session recording video buffers until its header can be written. *)
+and buffer session item =
+  if session.buffering_since = None then
+    session.buffering_since <- Some (Unix.gettimeofday ());
+  session.pending <- (Unix.gettimeofday (), item) :: session.pending;
+  match session.video with
+  | None -> ()
+  | Some video ->
+      ignore (open_matroska session video);
+      (* If no picture has ever arrived, the buffer would otherwise grow
+         without end; give up on the camera and record the audio alone. *)
+      if
+        session.recording = None
+        && Rtp.Frame.dimensions video.frames = None
+        && buffered_for session > video_timeout
+      then begin
+          log.warning (fun log ->
+              log "session %s: no video after %.0fs, recording audio only"
+                (ufrag session) video_timeout);
+          session.video <- None;
+          let pending = List.rev session.pending in
+          session.pending <- [];
+          session.buffering_since <- None;
+          List.iter
+            (fun (_, item) ->
+              match item with
+              | Buffered_audio (timestamp, packet) ->
+                  write_audio session ~timestamp packet
+              | Buffered_video _ -> ())
+            pending
+      end
+
+let write_frame session (frame : Rtp.Frame.frame) =
+  match session.recording with
+  | Some (Matroska writer) ->
+      Matroska.Writer.write_video writer ~arrival:(Unix.gettimeofday ())
+        ~timestamp:frame.timestamp ~keyframe:frame.keyframe frame.data
+  | Some (Ogg _) ->
+      (* Unreachable: an Ogg file is only ever opened once the session has
+         given up on video, after which no frame reaches here. *)
+      ()
+  | None -> buffer session (Buffered_video frame)
 
 let stop_recording session =
+  (* Whatever the jitter buffers are still holding belongs in the file, and so
+     does anything still waiting on a header that will never be completed. *)
+  Option.iter
+    (fun audio ->
+      List.iter
+        (fun (timestamp, packet) -> write_audio session ~timestamp packet)
+        (Rtp.Reorder.flush audio.audio_reorder))
+    session.audio;
+  Option.iter
+    (fun video ->
+      List.iter
+        (fun packet -> List.iter (write_frame session) (Rtp.Frame.push video.frames packet))
+        (Rtp.Reorder.flush video.video_reorder);
+      List.iter (write_frame session) (Rtp.Frame.flush video.frames);
+      (* A recording too short to have satisfied both tracks still has media
+         worth keeping. *)
+      if session.recording = None then
+        ignore (open_matroska ~force:true session video))
+    session.video;
   match session.recording with
   | None -> ()
-  | Some writer ->
-      (* Whatever the jitter buffer is still holding belongs in the file. *)
-      write_packets session (Rtp.Reorder.flush session.reorder);
-      Oggopus.Writer.close writer;
+  | Some container ->
+      let duration =
+        match container with
+        | Ogg writer ->
+            Oggopus.Writer.close writer;
+            Oggopus.Writer.duration writer
+        | Matroska writer ->
+            Matroska.Writer.close writer;
+            Matroska.Writer.duration writer
+      in
       session.recording <- None;
+      let losses =
+        String.concat ", "
+          (List.filter_map Fun.id
+             [
+               Option.map
+                 (fun audio ->
+                   Printf.sprintf "%d audio packet(s) lost"
+                     (Rtp.Reorder.lost audio.audio_reorder))
+                 session.audio;
+               Option.map
+                 (fun video ->
+                   Printf.sprintf "%d video packet(s) lost, %d frame(s) dropped"
+                     (Rtp.Reorder.lost video.video_reorder)
+                     (Rtp.Frame.dropped video.frames))
+                 session.video;
+             ])
+      in
       log.info (fun log ->
-          log "session %s: recorded %.1fs to %s, %d packet(s) lost"
-            (ufrag session)
-            (Oggopus.Writer.duration writer)
-            session.recording_path
-            (Rtp.Reorder.lost session.reorder))
+          log "session %s: recorded %.1fs to %s, %s" (ufrag session) duration
+            session.recording_path losses)
 
 (* Signalling ------------------------------------------------------------- *)
 
 let handle_offer request =
   let%lwt body = Dream.body request in
+  log.debug (fun log -> log "offer:\n%s" body);
   match Sdp.parse_offer body with
   | exception Sdp.Invalid message ->
       log.warning (fun log -> log "rejected an offer: %s" message);
       Dream.respond ~status:`Bad_Request message
   | offer ->
       let ice = Ice.Agent.create ~remote:{ ufrag = offer.ice_ufrag; pwd = offer.ice_pwd } in
+      let audio =
+        Option.map
+          (fun codec ->
+            { audio_codec = codec; audio_reorder = Rtp.Reorder.create () })
+          (Sdp.codec offer "audio")
+      in
+      let video =
+        Option.bind (Sdp.codec offer "video") (fun codec ->
+            Option.map
+              (fun format ->
+                {
+                  video_codec = codec;
+                  format;
+                  (* A picture is spread over far more packets than an Opus
+                     frame, so the same amount of reordering needs a much
+                     deeper buffer to absorb it. *)
+                  video_reorder = Rtp.Reorder.create ~depth:128 ();
+                  frames = Rtp.Frame.create format;
+                  started = false;
+                })
+              (match String.lowercase_ascii codec.name with
+              | "vp8" -> Some Rtp.Frame.Vp8
+              | "h264" -> Some Rtp.Frame.H264
+              | _ -> None))
+      in
       let session =
         {
           ice;
-          offer;
           dtls = Dtls.Server.create (Lazy.force dtls_config);
           srtp = None;
+          audio;
+          video;
           recording = None;
           recording_path = "";
-          reorder = Rtp.Reorder.create ();
+          pending = [];
+          buffering_since = None;
+          audio_channels = None;
           created = Unix.gettimeofday ();
         }
       in
@@ -163,9 +385,25 @@ let handle_offer request =
           ~fingerprint:("sha-256", (Lazy.force certificate).fingerprint)
           ()
       in
+      let describe kind = function
+        | None -> None
+        | Some (codec : Sdp.codec) ->
+            Some (Printf.sprintf "%s on payload type %d" kind codec.payload_type)
+      in
       log.info (fun log ->
-          log "new session %s (peer ufrag %s, Opus on payload type %d)"
-            (Ice.Agent.local ice).ufrag offer.ice_ufrag offer.opus.payload_type);
+          log "new session %s (peer ufrag %s, %s)" (Ice.Agent.local ice).ufrag
+            offer.ice_ufrag
+            (String.concat ", "
+               (List.filter_map Fun.id
+                  [
+                    describe "Opus" (Option.map (fun a -> a.audio_codec) audio);
+                    describe
+                      (match video with
+                      | Some { format = Rtp.Frame.H264; _ } -> "H.264"
+                      | _ -> "VP8")
+                      (Option.map (fun v -> v.video_codec) video);
+                  ])));
+      log.debug (fun log -> log "answer:\n%s" answer);
       Dream.respond
         ~headers:
           [
@@ -269,18 +507,49 @@ let handle_dtls socket ~source session datagram =
       end);
   Lwt.return_unit
 
+(* The two streams share a transport under BUNDLE and are told apart by their
+   payload type, which the answer fixed one per kind. *)
+let handle_rtp session (packet : Rtp.Packet.t) =
+  let matching payload_type = function
+    | Some x when payload_type x = packet.payload_type -> Some x
+    | _ -> None
+  in
+  let audio = matching (fun a -> a.audio_codec.payload_type) session.audio in
+  let video = matching (fun v -> v.video_codec.payload_type) session.video in
+  match (audio, video) with
+  | Some audio, _ ->
+      List.iter
+        (fun (timestamp, payload) -> write_audio session ~timestamp payload)
+        (Rtp.Reorder.push audio.audio_reorder packet.sequence
+           (packet.timestamp, packet.payload))
+  | _, Some video ->
+      List.iter
+        (fun packet ->
+          List.iter
+            (fun (frame : Rtp.Frame.frame) ->
+              (* Nothing before the first keyframe can be decoded, so nothing
+                 before it is worth keeping. *)
+              if frame.keyframe then video.started <- true;
+              if video.started then write_frame session frame)
+            (Rtp.Frame.push video.frames packet))
+        (Rtp.Reorder.push video.video_reorder packet.sequence packet)
+  | None, None ->
+      (* Comfort noise, retransmissions, redundancy and the codecs we turned
+         down all arrive on payload types of their own. *)
+      log.debug (fun log -> log "ignoring payload type %d" packet.payload_type)
+
 let handle_media session datagram =
   match session.srtp with
   | None ->
       (* Media before the handshake finished: there is nothing to decrypt it
          with yet. *)
       log.debug (fun log -> log "media before the SRTP keys were exchanged")
-  | Some srtp ->
+  | Some srtp -> (
       let unprotect =
         if Rtp.Packet.is_rtcp datagram then Srtp.unprotect_rtcp srtp
         else Srtp.unprotect srtp
       in
-      (match unprotect datagram with
+      match unprotect datagram with
       | Error error ->
           log.warning (fun log ->
               log "session %s: %s" (ufrag session) (Srtp.string_of_error error))
@@ -290,15 +559,7 @@ let handle_media session datagram =
           match Rtp.Packet.parse packet with
           | exception Rtp.Packet.Invalid message ->
               log.warning (fun log -> log "malformed RTP packet: %s" message)
-          | packet when packet.payload_type <> session.offer.opus.payload_type ->
-              (* Comfort noise, retransmissions and redundancy all arrive on
-                 payload types of their own; we want the Opus stream. *)
-              log.debug (fun log ->
-                  log "ignoring payload type %d" packet.payload_type)
-          | packet ->
-              write_packets session
-                (Rtp.Reorder.push session.reorder packet.sequence
-                   (packet.timestamp, packet.payload))))
+          | packet -> handle_rtp session packet))
 
 let handle_datagram socket ~source datagram =
   let session () = Hashtbl.find_opt sessions_by_peer source in

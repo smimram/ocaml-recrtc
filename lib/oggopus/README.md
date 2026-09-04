@@ -1,7 +1,13 @@
 # oggopus
 
 Writing an Ogg Opus file (RFC 3533, RFC 7845) from the Opus packets of an RTP
-stream. No dependencies.
+stream. Depends on `rtp`, for the timeline the granule positions are measured
+against.
+
+This is what an audio-only session is recorded to. A session that also carries
+video goes to `matroska` instead, which borrows the Opus identification header
+from here — the same block opens an Ogg file and fills Matroska's
+`CodecPrivate`.
 
 ## Why it is written here
 

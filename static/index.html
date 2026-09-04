@@ -8,8 +8,13 @@
   </head>
   <body>
     <h1>recrtc</h1>
-    <p>Send the microphone to the server over WebRTC, and record it there.</p>
-    <p><button id="record">Record</button> <span id="state">idle</span></p>
+    <p>Send the microphone, and the camera if you like, to the server over
+      WebRTC, and record it there.</p>
+    <p>
+      <button id="record">Record</button> <span id="state">idle</span>
+      <label><input type="checkbox" id="video" checked /> camera</label>
+    </p>
+    <video id="preview" hidden autoplay muted playsinline width="320"></video>
     <pre id="log"></pre>
     <script src="/recrtc.js"></script>
   </body>

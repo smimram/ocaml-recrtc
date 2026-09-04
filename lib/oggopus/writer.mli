@@ -15,6 +15,15 @@ val samples : string -> int
 (** A packet's duration in granule units, from its table-of-contents byte
     (RFC 6716 §3.1). *)
 
+val pre_skip : int
+(** How many samples a decoder discards at the start of the stream. It is not
+    negotiated anywhere, so a recorder can only use the conventional value. *)
+
+val head : channels:int -> pre_skip:int -> string
+(** The Opus identification header (RFC 7845 §5.1). It opens an Ogg Opus file,
+    and it is also what a Matroska file stores as the track's private data, so
+    it is exposed rather than hidden in {!create}. *)
+
 val channels : string -> int
 (** Whether a packet carries one or two channels. A browser encoding a mono
     microphone sends mono packets whatever its offer said, and the file's

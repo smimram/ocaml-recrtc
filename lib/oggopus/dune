@@ -1,2 +1,3 @@
 (library
- (name oggopus))
+ (name oggopus)
+ (libraries rtp))

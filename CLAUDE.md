@@ -4,10 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`recrtc` records what a browser sends over WebRTC as an Ogg/Opus file. The
-WebRTC transport stack is implemented here because none of it exists in opam:
-`tls` has no DTLS, and there is no STUN, ICE, SRTP or SDP package. `README.md`
-describes the result; this file is about working on it.
+`recrtc` records what a browser sends over WebRTC — Opus audio, and VP8 or
+H.264 video — as an Ogg/Opus or Matroska file. The WebRTC transport stack is
+implemented here because none of it exists in opam: `tls` has no DTLS, and
+there is no STUN, ICE, SRTP or SDP package. `README.md` describes the result;
+this file is about working on it.
 
 `experiments/recws/` is a separate, self-contained predecessor that uploaded
 `MediaRecorder` chunks over HTTP. It is kept for reference and is not part of
@@ -23,7 +24,9 @@ make serve IP=<address>  # override the advertised candidates
 make serve ARGS=--debug  # extra flags
 ```
 
-`--debug` logs every dropped datagram. `--ip` is only needed when the address
+`--debug` logs every dropped datagram, and the offer and answer in full, which
+is usually the fastest way to see why a browser is not sending something.
+`--ip` is only needed when the address
 to advertise is not one the machine can see for itself; see "The advertised
 address" below.
 
@@ -54,9 +57,22 @@ chromium --headless=new --no-sandbox --use-fake-ui-for-media-stream \
   --use-fake-device-for-media-stream "http://localhost:8080/?autostart"
 ```
 
-The `?autostart` hook in `static/recrtc.js` exists for exactly this. Chromium's
-fake device emits a 440 Hz beep, so a good recording shows that peak in an FFT
-and probes as mono 48 kHz Opus.
+The `?autostart` hook in `static/recrtc.js` exists for exactly this; `&audio`
+records audio alone, and `&codec=h264` narrows the offer through
+`setCodecPreferences` so the other video path can be reached, since a browser
+otherwise always picks VP8 from what we accept.
+
+Chromium's fake device sounds a steady tone (400 Hz in current builds, not the
+440 Hz older notes claim — measure, do not assume) and draws a rolling disc
+**with the timecode burnt into the picture**. That last one is the useful part:
+seek to five seconds, extract the frame, and if it reads `0:00:05` the two
+timelines are right, which no amount of probing the container will tell you.
+
+```sh
+ffprobe -hide_banner recording-*.webm          # VP8 640x480 + Opus 48000 mono
+ffmpeg -i recording-*.webm -f null -           # decodes clean, exit 0
+ffmpeg -ss 5 -i recording-*.webm -frames:v 1 frame.png
+```
 
 ## Architecture
 
@@ -71,11 +87,16 @@ fragment inside a STUN check's USERNAME, and by source address
 (`sessions_by_peer`) for DTLS and media, which identify themselves no other
 way. `track_peer` updates the second when the agent latches or re-latches.
 
+Both tracks share that one transport under BUNDLE and are told apart **by
+payload type**, which `lib/sdp` fixes at one per kind when it answers.
+
 Layering: `sdp` and `ice` are independent; `dtls` produces the SRTP keying
 material that `srtp` consumes; `srtp` depends on `rtp` for the header length,
-which is also where encryption starts; `oggopus` takes the Opus packets out the
-far end. `lib/ice/stun.ml` deliberately has no `Unix` dependency so the RFC
-vectors can drive it.
+which is also where encryption starts; `rtp` also holds the VP8 and H.264
+payload formats and the timeline both containers measure against; `oggopus`
+takes the Opus packets out the far end, and `matroska` takes both, borrowing
+the Opus header from `oggopus`. `lib/ice/stun.ml` deliberately has no `Unix`
+dependency so the RFC vectors can drive it.
 
 `Dtls.Server` is a pure state machine — `handle : t -> datagram -> datagram
 list * event` — which is what lets `test/dtls_harness.exe` and `src/recrtc.ml`
@@ -83,7 +104,8 @@ drive the same code. Keep it that way.
 
 Deliberate scope limits, all load-bearing: ICE-lite (we never send checks),
 `a=setup:passive` (so only the DTLS *server* side exists), one cipher suite,
-one SRTP profile, no application data over DTLS, audio only.
+one SRTP profile, no application data over DTLS, no RTCP ever sent, one audio
+and one video stream per session.
 
 ## Things that will bite you
 
@@ -119,6 +141,33 @@ only helps when that pattern is the line's *only* mention of the binary; if the
 same command also runs `./_build/.../recrtc.exe`, the shell matches anyway.
 Kill by PID, or give the `pkill` a line of its own.
 
+**Codec names are echoed, not normalised.** Encoding names in `a=rtpmap` are
+case-insensitive (RFC 4566 §6) and browsers are inconsistent: Chrome writes
+`opus` but `VP8`. `lib/sdp` used to lowercase the name it parsed, which was
+invisible for audio and fatal for video — answering `vp8` where Chrome offered
+`VP8` makes it negotiate the section, report the sender *active*, and then
+never start its encoder. No error, no warning, `framesEncoded` stuck at zero
+and `targetBitrate` undefined. Match case-insensitively; echo the offer's own
+spelling.
+
+When video is silently absent like that, the fastest diagnosis is
+`connection.getStats()` from the page against `--enable-logging=stderr`:
+`media-source` tells you whether the camera is producing frames at all, and
+`outbound-rtp` whether the encoder ever ran. It separates "the browser is not
+sending" from "we are not receiving" in one step.
+
+**An incomplete picture is dropped, not written short.** This is where the
+video path stops resembling the audio one. A lost audio packet leaves a gap of
+the right length and everything after it is still fine. A lost video packet
+does not shorten a picture, it corrupts it, and every frame predicted from it
+afterwards. `Rtp.Frame` therefore discards a frame with a sequence gap in it,
+and the recording does not start until the first keyframe.
+
+**Matroska lengths of all ones are reserved.** A variable-width integer whose
+value bits are all ones means "unknown", so each width holds one less than it
+looks: 126 fits in one byte and 127 needs two. Getting this wrong writes a file
+that parses right up until it doesn't.
+
 **Log levels.** `Dream.sub_log` keeps the threshold in force when it was
 created, and the `log` value here is created at module initialisation, before
 `main` runs. `Dream.initialize_log ~level` alone will not make its `debug`
@@ -128,15 +177,23 @@ calls appear; ``Dream.set_log_level "recrtc" `Debug`` is also needed.
 reaching the same server over a LAN address does not, and the Record button
 fails there. Recording from another machine needs HTTPS in front.
 
-**Ogg muxing is ours on purpose.** `ocaml-ogg` cannot do it —
+**Muxing is ours on purpose, in both containers.** `ocaml-ogg` cannot do it —
 `Ogg.Stream.packet` is abstract with no constructor — and `ocaml-opus` only
-encodes from PCM. Routing through them would mean decoding and re-encoding the
-browser's audio. `lib/oggopus` writes pages directly so packets are stored
-bit-exact. Do not reintroduce those dependencies for this.
+encodes from PCM. Routing through them, or through anything that wants raw
+samples, would mean decoding and re-encoding what the browser already encoded.
+`lib/oggopus` and `lib/matroska` write bytes directly so packets and frames are
+stored bit-exact. Do not reintroduce those dependencies for this.
 
 **Granule positions come from RTP timestamps**, not from accumulating packet
 durations: both count 48 kHz samples, so a lost packet leaves a gap of the
-right length instead of pulling everything after it earlier.
+right length instead of pulling everything after it earlier. `Rtp.Timeline`
+holds the wrap handling both containers need.
+
+**A Matroska recording that is killed still plays.** Lengths not known when an
+element opens — the segment, each cluster — are written as the eight-byte
+"unknown" form and patched in place on close. Keep it that way: it is why a
+`kill -9` mid-recording leaves a file that decodes to its last cluster, missing
+only its duration. Worth re-checking after touching `lib/matroska/writer.ml`.
 
 ## Conventions
 

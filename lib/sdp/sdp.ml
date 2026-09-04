@@ -1,7 +1,7 @@
-(** Minimal SDP support for a WebRTC audio receiver.
+(** Minimal SDP support for a WebRTC receiver.
 
-    We only ever deal with the one shape of session a browser produces for a
-    single sendonly audio track, so the parser is deliberately partial: it looks
+    We only ever deal with the shape of session a browser produces for a
+    microphone and a camera, so the parser is deliberately partial: it looks
     for the attributes we need and ignores everything else. *)
 
 type direction = Sendrecv | Sendonly | Recvonly | Inactive
@@ -28,18 +28,32 @@ type codec = {
   fmtp : string option;
 }
 
-(** Everything we need out of an offer. Session-level [a=ice-ufrag] and friends
-    are folded into the media description, media level winning. *)
-type offer = {
+(** One media section of the offer, with the codec we chose to receive on it —
+    [None] for a section we have nothing to offer, whose [m=] line is kept so
+    that the answer can echo it back rejected. *)
+type media = {
   mid : string;
-  opus : codec;
+  kind : string;
+  line : string;
+  codec : codec option;
+  direction : direction;
+}
+
+(** Everything we need out of an offer. Session-level [a=ice-ufrag] and friends
+    are folded into the media descriptions, media level winning. *)
+type offer = {
+  media : media list;
   ice_ufrag : string;
   ice_pwd : string;
   fingerprint : string * string;  (** algorithm, colon-separated hex *)
   setup : string;
   rtcp_mux : bool;
-  direction : direction;
 }
+
+let codec offer kind =
+  List.find_map
+    (fun media -> if media.kind = kind then media.codec else None)
+    offer.media
 
 exception Invalid of string
 
@@ -76,7 +90,11 @@ let int_of_string_exn what s =
   | None -> invalid "expected an integer for %s, got %S" what s
 
 (* An m-section: the m= line's own value plus the attributes that follow it. *)
-type section = { kind : string; attributes : (string * string option) list }
+type section = {
+  kind : string;
+  line : string;  (** the whole m= value, for echoing a rejection back *)
+  attributes : (string * string option) list;
+}
 
 let sections sdp =
   let session, media =
@@ -85,7 +103,7 @@ let sections sdp =
         match field line with
         | 'm', value ->
             let kind = match words value with k :: _ -> k | [] -> "" in
-            (session, { kind; attributes = [] } :: media)
+            (session, { kind; line = value; attributes = [] } :: media)
         | 'a', value -> (
             let a = attribute value in
             match media with
@@ -140,7 +158,7 @@ let parse_rtpmap ~fmtps value =
           Some
             {
               payload_type;
-              name = String.lowercase_ascii name;
+              name;
               clock_rate = int_of_string_exn "clock rate" rate;
               channels = 1;
               fmtp;
@@ -149,7 +167,7 @@ let parse_rtpmap ~fmtps value =
           Some
             {
               payload_type;
-              name = String.lowercase_ascii name;
+              name;
               clock_rate = int_of_string_exn "clock rate" rate;
               channels = int_of_string_exn "channel count" channels;
               fmtp;
@@ -165,37 +183,90 @@ let parse_fingerprint value =
           (String.sub value (i + 1) (String.length value - i - 1)) )
   | None -> invalid "bad a=fingerprint: %S" value
 
+(* Choosing a codec ------------------------------------------------------- *)
+
+(* A section lists far more than the stream itself: retransmissions, redundancy
+   and forward error correction each take a payload type of their own, and a
+   browser offers several video codecs at once. We pick one thing to receive
+   per section and ignore the rest, which is why the media loop can filter on
+   the payload type alone. *)
+
+let codecs section =
+  let fmtps = get_all section "fmtp" in
+  List.filter_map (parse_rtpmap ~fmtps) (get_all section "rtpmap")
+
+(* Encoding names are case-insensitive (RFC 4566 §6), and browsers disagree
+   on the case they write: "opus" but "VP8". They are matched accordingly, and
+   the answer echoes back the spelling the offer used rather than one of our
+   own. *)
+let named codec name = String.lowercase_ascii codec.name = name
+let first_named codecs name = List.find_opt (fun c -> named c name) codecs
+
+(* H.264 is offered twice over, once for each packetization mode. Mode 1 is
+   what a browser actually sends and the only one that can fragment a picture
+   across datagrams; mode 0 would silently drop every frame larger than an
+   MTU (RFC 6184 §6.2). *)
+let fragmentable codec =
+  match codec.fmtp with
+  | None -> false
+  | Some fmtp ->
+      List.exists
+        (fun parameter -> String.trim parameter = "packetization-mode=1")
+        (String.split_on_char ';' fmtp)
+
+let choose_video codecs =
+  match first_named codecs "vp8" with
+  | Some vp8 -> Some vp8
+  | None -> (
+      let h264 = List.filter (fun c -> named c "h264") codecs in
+      match List.find_opt fragmentable h264 with
+      | Some codec -> Some codec
+      | None -> None)
+
+let choose section =
+  let codecs = codecs section in
+  match section.kind with
+  | "audio" -> first_named codecs "opus"
+  | "video" -> choose_video codecs
+  | _ -> None
+
 let parse_offer sdp =
-  let audio =
-    match List.filter (fun s -> s.kind = "audio") (sections sdp) with
-    | [ s ] -> s
-    | [] -> invalid "no audio media section"
-    | _ -> invalid "several audio media sections are not supported"
+  let sections = sections sdp in
+  (* Under BUNDLE every section carries the same transport parameters, so the
+     first that has them speaks for all. *)
+  let transport =
+    match List.filter (fun s -> get_value s "ice-ufrag" <> None) sections with
+    | s :: _ -> s
+    | [] -> invalid "no media section carries a=ice-ufrag"
   in
-  let fmtps = get_all audio "fmtp" in
-  let opus =
-    match
-      List.filter_map (parse_rtpmap ~fmtps) (get_all audio "rtpmap")
-      |> List.filter (fun c -> c.name = "opus")
-    with
-    | c :: _ -> c
-    | [] -> invalid "the offer does not propose Opus"
+  let media =
+    List.map
+      (fun section ->
+        {
+          mid = (match get_value section "mid" with Some m -> m | None -> "0");
+          kind = section.kind;
+          line = section.line;
+          codec = choose section;
+          direction =
+            List.find_map
+              (fun (name, _) -> direction_of_string name)
+              section.attributes
+            |> Option.value ~default:Sendrecv;
+        })
+      sections
   in
-  let direction =
-    List.find_map
-      (fun (name, _) -> direction_of_string name)
-      audio.attributes
-    |> Option.value ~default:Sendrecv
-  in
+  if not (List.exists (fun m -> m.codec <> None) media) then
+    invalid
+      "the offer proposes nothing we can receive: Opus for audio, VP8 or \
+       H.264 for video";
   {
-    mid = (match get_value audio "mid" with Some m -> m | None -> "0");
-    opus;
-    ice_ufrag = require audio "ice-ufrag";
-    ice_pwd = require audio "ice-pwd";
-    fingerprint = parse_fingerprint (require audio "fingerprint");
-    setup = (match get_value audio "setup" with Some s -> s | None -> "actpass");
-    rtcp_mux = has audio "rtcp-mux";
-    direction;
+    media;
+    ice_ufrag = require transport "ice-ufrag";
+    ice_pwd = require transport "ice-pwd";
+    fingerprint = parse_fingerprint (require transport "fingerprint");
+    setup =
+      (match get_value transport "setup" with Some s -> s | None -> "actpass");
+    rtcp_mux = has transport "rtcp-mux";
   }
 
 (* Generation ------------------------------------------------------------- *)
@@ -209,7 +280,8 @@ let host_priority rank =
   (126 * 0x1000000) + (local_preference * 256) + 255
 
 (** The answer to [offer]: we are an ICE-lite, DTLS-passive, receive-only
-    endpoint reachable at [port] on each of [addresses], most preferred first.
+    endpoint reachable at [port] on each of [addresses], most preferred first,
+    with every section we accepted bundled onto that one transport.
 
     Several are worth offering because the peer pairs its own candidates with
     ours by address family and route: a browser on the same machine as the
@@ -224,32 +296,66 @@ let answer ~offer ~addresses ~port ~ice_ufrag ~ice_pwd ~fingerprint () =
   let buffer = Buffer.create 1024 in
   let line fmt = Printf.ksprintf (fun s -> Buffer.add_string buffer (s ^ "\r\n")) fmt in
   let algorithm, digest = fingerprint in
-  let pt = offer.opus.payload_type in
+  let accepted = List.filter (fun m -> m.codec <> None) offer.media in
   line "v=0";
   line "o=- %Lu 1 IN IP4 127.0.0.1" (Random.int64 Int64.max_int);
   line "s=-";
   line "t=0 0";
   line "a=ice-lite";
-  line "a=group:BUNDLE %s" offer.mid;
+  (* Only the sections we accepted share the transport; a rejected one is not
+     part of the group. *)
+  line "a=group:BUNDLE %s"
+    (String.concat " " (List.map (fun m -> m.mid) accepted));
   line "a=msid-semantic: WMS";
-  line "m=audio %d UDP/TLS/RTP/SAVPF %d" port pt;
-  line "c=IN IP4 %s" ip;
-  line "a=rtcp:%d IN IP4 %s" port ip;
-  line "a=ice-ufrag:%s" ice_ufrag;
-  line "a=ice-pwd:%s" ice_pwd;
-  line "a=fingerprint:%s %s" algorithm digest;
-  line "a=setup:passive";
-  line "a=mid:%s" offer.mid;
-  line "a=recvonly";
-  line "a=rtcp-mux";
-  line "a=rtpmap:%d %s/%d/%d" pt offer.opus.name offer.opus.clock_rate
-    offer.opus.channels;
-  (* Echoed verbatim: the browser chose these parameters for its encoder. *)
-  Option.iter (fun fmtp -> line "a=fmtp:%d %s" pt fmtp) offer.opus.fmtp;
-  List.iteri
-    (fun rank address ->
-      line "a=candidate:%d 1 udp %d %s %d typ host" (rank + 1)
-        (host_priority rank) address port)
-    addresses;
-  line "a=end-of-candidates";
+  (* An answer has one section per section of the offer, in the same order:
+     that correspondence is how the two sides agree on what each is about
+     (RFC 3264 §6). A section we cannot use is given a port of zero rather
+     than left out. *)
+  List.iter
+    (fun (media : media) ->
+      let protocol =
+        match words media.line with _ :: _ :: protocol :: _ -> protocol
+        | _ -> "UDP/TLS/RTP/SAVPF"
+      in
+      match media.codec with
+      | None ->
+          (* Rejected, but still described: the formats are echoed because a
+             section with an empty format list is malformed. *)
+          let formats =
+            match words media.line with
+            | _ :: _ :: _ :: formats when formats <> [] -> String.concat " " formats
+            | _ -> "0"
+          in
+          line "m=%s 0 %s %s" media.kind protocol formats;
+          line "c=IN IP4 %s" ip;
+          line "a=mid:%s" media.mid;
+          line "a=inactive"
+      | Some codec ->
+          let pt = codec.payload_type in
+          line "m=%s %d %s %d" media.kind port protocol pt;
+          line "c=IN IP4 %s" ip;
+          line "a=rtcp:%d IN IP4 %s" port ip;
+          line "a=ice-ufrag:%s" ice_ufrag;
+          line "a=ice-pwd:%s" ice_pwd;
+          line "a=fingerprint:%s %s" algorithm digest;
+          line "a=setup:passive";
+          line "a=mid:%s" media.mid;
+          line "a=recvonly";
+          line "a=rtcp-mux";
+          (match media.kind with
+          | "audio" ->
+              line "a=rtpmap:%d %s/%d/%d" pt codec.name codec.clock_rate
+                codec.channels
+          | _ -> line "a=rtpmap:%d %s/%d" pt codec.name codec.clock_rate);
+          (* Echoed verbatim: the browser chose these parameters for its own
+             encoder, and an answer that changed them would be asking it to
+             encode differently. *)
+          Option.iter (fun fmtp -> line "a=fmtp:%d %s" pt fmtp) codec.fmtp;
+          List.iteri
+            (fun rank address ->
+              line "a=candidate:%d 1 udp %d %s %d typ host" (rank + 1)
+                (host_priority rank) address port)
+            addresses;
+          line "a=end-of-candidates")
+    offer.media;
   Buffer.contents buffer

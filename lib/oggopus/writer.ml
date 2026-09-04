@@ -45,6 +45,11 @@ let add_uint32_le buffer n =
   add_uint16_le buffer (n land 0xffff);
   add_uint16_le buffer ((n lsr 16) land 0xffff)
 
+(* What the browser's encoder discards at the start of the stream. It is not
+   negotiated anywhere, so the conventional value is all a recorder can offer;
+   it is a couple of packets' worth either way. *)
+let pre_skip = 312
+
 let head ~channels ~pre_skip =
   let buffer = Buffer.create 19 in
   Buffer.add_string buffer "OpusHead";
@@ -75,11 +80,9 @@ type t = {
   serial : int32;
   pre_skip : int;
   mutable page_number : int;
-  (* The timestamp the stream started at, against which granule positions are
-     measured, and the last one seen, to notice the 32-bit clock wrapping. *)
-  mutable origin : int64 option;
-  mutable last_timestamp : int32;
-  mutable wraps : int64;
+  (* Granule positions are measured from the timestamp the stream started at,
+     which is what the timeline keeps track of. *)
+  timeline : Rtp.Timeline.t;
   mutable granule : int64;  (** at the end of the last buffered packet *)
   mutable packets : string list;  (** buffered for the current page, reversed *)
   mutable segments : int;
@@ -89,7 +92,7 @@ type t = {
    to the brim: a smaller page loses less audio if the file is truncated. *)
 let segments_per_page = 200
 
-let create ?(channels = 2) ?(pre_skip = 312) ?(vendor = "recrtc")
+let create ?(channels = 2) ?(pre_skip = pre_skip) ?(vendor = "recrtc")
     ?(comments = []) path =
   let channel = open_out_bin path in
   let t =
@@ -98,9 +101,7 @@ let create ?(channels = 2) ?(pre_skip = 312) ?(vendor = "recrtc")
       serial = Random.int32 Int32.max_int;
       pre_skip;
       page_number = 0;
-      origin = None;
-      last_timestamp = 0l;
-      wraps = 0L;
+      timeline = Rtp.Timeline.create ();
       granule = 0L;
       packets = [];
       segments = 0;
@@ -131,29 +132,10 @@ let flush_page ?(flags = []) t =
     t.segments <- 0
   end
 
-(** The stream's own timeline, in 48 kHz samples, from an RTP timestamp that
-    wraps every day or so. *)
-let unsigned timestamp = Int64.logand (Int64.of_int32 timestamp) 0xFFFFFFFFL
-
-let elapsed t timestamp =
-  (* The clock wrapped if the new timestamp is far enough behind the last one;
-     a small step backwards is only a packet arriving out of order. *)
-  if
-    Int32.unsigned_compare timestamp t.last_timestamp < 0
-    && Int64.sub (unsigned t.last_timestamp) (unsigned timestamp) > 0x40000000L
-  then t.wraps <- Int64.add t.wraps 0x100000000L;
-  t.last_timestamp <- timestamp;
-  let absolute = Int64.add t.wraps (unsigned timestamp) in
-  match t.origin with
-  | Some origin -> Int64.sub absolute origin
-  | None ->
-      t.origin <- Some absolute;
-      0L
-
 (** Append one Opus packet, taken from an RTP packet with the given timestamp.
     Packets must be given in order. *)
 let write t ~timestamp packet =
-  let position = elapsed t timestamp in
+  let position = Rtp.Timeline.elapsed t.timeline timestamp in
   let granule =
     Int64.add (Int64.of_int t.pre_skip) (Int64.add position (Int64.of_int (samples packet)))
   in
