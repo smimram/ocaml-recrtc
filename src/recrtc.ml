@@ -641,6 +641,19 @@ let handle_rtp socket session (packet : Rtp.Packet.t) =
          down all arrive on payload types of their own. *)
       log.debug (fun log -> log "ignoring payload type %d" packet.payload_type)
 
+(* A jitter buffer only reconsiders a gap when something is pushed into it, so
+   a track that goes quiet mid-gap would hold what it has indefinitely while
+   the other track carries on. Every datagram of the session is an occasion to
+   look at both. *)
+let expire_reorders socket session =
+  Option.iter
+    (fun audio -> deliver_audio session (Rtp.Reorder.expire audio.audio_reorder))
+    session.audio;
+  Option.iter
+    (fun video ->
+      deliver_video socket session video (Rtp.Reorder.expire video.video_reorder))
+    session.video
+
 let handle_media socket session datagram =
   match session.srtp with
   | None ->
@@ -648,6 +661,7 @@ let handle_media socket session datagram =
          with yet. *)
       log.debug (fun log -> log "media before the SRTP keys were exchanged")
   | Some srtp -> (
+      expire_reorders socket session;
       let unprotect =
         if Rtp.Packet.is_rtcp datagram then Srtp.unprotect_rtcp srtp
         else Srtp.unprotect srtp

@@ -103,7 +103,9 @@ keyframe requests `rtp` builds; `rtp` also holds the VP8, VP9 and H.264
 payload formats and the timeline both containers measure against; `oggopus`
 takes the Opus packets out the far end, and `matroska` takes both, borrowing
 the Opus header from `oggopus`. `lib/ice/stun.ml` deliberately has no `Unix`
-dependency so the RFC vectors can drive it.
+dependency so the RFC vectors can drive it. `rtp` does depend on `unix`, for
+the jitter buffer's deadline alone; every function of it that reads the clock
+takes an optional `?now`, so the tests stay deterministic.
 
 `Dtls.Server` is a pure state machine — `handle : t -> datagram -> datagram
 list * event` — which is what lets `test/dtls_harness.exe` and `src/recrtc.ml`
@@ -181,6 +183,15 @@ request must not leave us recording nothing at all. Chromium's `outbound-rtp`
 statistics are where to look if this seems not to work: `pliCount` says whether
 our packets are arriving and being understood, and `keyFramesEncoded` whether
 they are being acted on.
+
+**A jitter buffer only thinks when pushed to.** `Rtp.Reorder` bounds a gap two
+ways, by depth and by a deadline, because a stream of a few packets a second
+never reaches the depth and a stream of hundreds reaches it having buffered far
+more than it needs. But both are tested inside `push`, so a track that falls
+silent mid-gap holds what it has for as long as the silence lasts. `expire` is
+what covers that, and `src/recrtc.ml` calls it for both tracks on every
+datagram of the session — video's gaps are therefore also aired by audio's
+packets.
 
 **Matroska lengths of all ones are reserved.** A variable-width integer whose
 value bits are all ones means "unknown", so each width holds one less than it

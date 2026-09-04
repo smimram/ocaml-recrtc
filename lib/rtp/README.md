@@ -37,10 +37,19 @@ A network reorders and loses packets; a file may not. The buffer holds packets
 back until they are in sequence, and hands them out in order.
 
 The rule that shapes it: **a recorder must never stall waiting for a packet
-that is not coming.** So the buffer is bounded — eight packets by default —
-and once it is deeper than that with a gap still unfilled, it writes the
-missing one off, counts it, and moves on to the oldest packet it does have. A
-packet that turns up after its place has passed is dropped, as is a duplicate.
+that is not coming.** So the wait is bounded two ways, and a gap that reaches
+either bound is written off, counted, and skipped to the oldest packet the
+buffer does hold. The depth — eight packets by default — bounds a busy stream,
+where the packets pile up in no time. The deadline — two hundred milliseconds —
+bounds a sparse one, where a few packets a second would sit on a gap for
+seconds before reaching any depth worth having. A packet that turns up after
+its place has passed is dropped, as is a duplicate.
+
+Both bounds are tested when a packet arrives, so a track that goes quiet in the
+middle of a gap would hold what it has indefinitely. `expire` is the way to say
+that time has passed without anything arriving; the server calls it for both
+tracks on every datagram, so each track's silence is covered by the other's
+packets.
 
 Sequence numbers are sixteen bits and wrap, so every comparison is modular:
 ordering is only meaningful within half the space (RFC 3550 §A.1).
@@ -115,5 +124,6 @@ carrying emulation-prevention bytes.
 
 `test.ml`: a packet with two CSRCs and a header extension, so the
 payload offset depends on both; then the buffer, through reordering, a
-duplicate, a late arrival, a gap that fills and a gap that never does; then the
+duplicate, a late arrival, a gap that fills, a gap that never does, and a gap
+outlasting the deadline on a stream too sparse to reach the depth; then the
 bytes of a picture loss indication.

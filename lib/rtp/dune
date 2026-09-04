@@ -1,6 +1,7 @@
 (library
  (name rtp)
- (modules :standard \ test test_vp8 test_vp9 test_h264))
+ (modules :standard \ test test_vp8 test_vp9 test_h264)
+ (libraries unix))
 
 (test
  (name test)
