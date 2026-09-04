@@ -24,11 +24,19 @@ let advertised_ip = ref "127.0.0.1"
 let bind_ip = ref None
 let debug = ref false
 
+(* Recordings are named after the moment they start, so that concurrent or
+   successive sessions never overwrite one another. *)
+let output_prefix = ref "recording"
+
 type session = {
   ice : Ice.Agent.t;
   offer : Sdp.offer;
   dtls : Dtls.Server.t;
   mutable srtp : Srtp.t option;
+  mutable recording : Oggopus.Writer.t option;
+  mutable recording_path : string;
+  (* The network may reorder packets; the file may not. *)
+  reorder : (int32 * string) Rtp.Reorder.t;
   created : float;
 }
 
@@ -42,6 +50,54 @@ let certificate = lazy (Dtls.Certificate.generate ())
 let dtls_config = lazy (Dtls.Server.config (Lazy.force certificate))
 
 let log = Dream.sub_log "recrtc"
+
+(* Names the session in the answer and in the request that ends it. *)
+let session_header = "X-Recrtc-Session"
+
+(* Recording --------------------------------------------------------------- *)
+
+let recording_path () =
+  let now = Unix.localtime (Unix.gettimeofday ()) in
+  Printf.sprintf "%s-%04d%02d%02d-%02d%02d%02d.opus" !output_prefix
+    (now.tm_year + 1900) (now.tm_mon + 1) now.tm_mday now.tm_hour now.tm_min
+    now.tm_sec
+
+(* The file is opened on the first packet: its header describes the stream, and
+   until a packet has arrived there is nothing to describe. *)
+let writer session packet =
+  match session.recording with
+  | Some writer -> writer
+  | None ->
+      let path = recording_path () in
+      let writer =
+        Oggopus.Writer.create ~channels:(Oggopus.Writer.channels packet) path
+      in
+      session.recording <- Some writer;
+      session.recording_path <- path;
+      log.info (fun log ->
+          log "session %s: recording to %s" session.ice.local.ufrag path);
+      writer
+
+let write_packets session packets =
+  List.iter
+    (fun (timestamp, payload) ->
+      Oggopus.Writer.write (writer session payload) ~timestamp payload)
+    packets
+
+let stop_recording session =
+  match session.recording with
+  | None -> ()
+  | Some writer ->
+      (* Whatever the jitter buffer is still holding belongs in the file. *)
+      write_packets session (Rtp.Reorder.flush session.reorder);
+      Oggopus.Writer.close writer;
+      session.recording <- None;
+      log.info (fun log ->
+          log "session %s: recorded %.1fs to %s, %d packet(s) lost"
+            session.ice.local.ufrag
+            (Oggopus.Writer.duration writer)
+            session.recording_path
+            (Rtp.Reorder.lost session.reorder))
 
 (* Signalling ------------------------------------------------------------- *)
 
@@ -59,6 +115,9 @@ let handle_offer request =
           offer;
           dtls = Dtls.Server.create (Lazy.force dtls_config);
           srtp = None;
+          recording = None;
+          recording_path = "";
+          reorder = Rtp.Reorder.create ();
           created = Unix.gettimeofday ();
         }
       in
@@ -72,7 +131,28 @@ let handle_offer request =
       log.info (fun log ->
           log "new session %s (peer ufrag %s, Opus on payload type %d)"
             ice.local.ufrag offer.ice_ufrag offer.opus.payload_type);
-      Dream.respond ~headers:[ ("Content-Type", "application/sdp") ] answer
+      Dream.respond
+        ~headers:
+          [
+            ("Content-Type", "application/sdp");
+            (* So that the page can ask for its own session to be closed
+               rather than leaving it to the idle sweep. *)
+            (session_header, ice.local.ufrag);
+          ]
+        answer
+
+let handle_stop request =
+  match Dream.header request session_header with
+  | None -> Dream.respond ~status:`Bad_Request "no session given"
+  | Some ufrag -> (
+      match Hashtbl.find_opt sessions ufrag with
+      | None -> Dream.respond ~status:`Not_Found "no such session"
+      | Some session ->
+          log.info (fun log -> log "session %s: stopped by the client" ufrag);
+          stop_recording session;
+          Hashtbl.remove sessions ufrag;
+          Option.iter (Hashtbl.remove sessions_by_peer) session.ice.peer;
+          Dream.respond "")
 
 (* Media ------------------------------------------------------------------ *)
 
@@ -133,8 +213,11 @@ let handle_dtls socket ~source session datagram =
   (match event with
   | Dtls.Server.Pending -> ()
   | Dtls.Server.Failed message ->
+      (* A peer that closes the connection cleanly ends up here too, so this is
+         also where a recording finishes when the browser hangs up. *)
       log.warning (fun log ->
-          log "session %s: DTLS handshake failed: %s" session.ice.local.ufrag message)
+          log "session %s: DTLS ended: %s" session.ice.local.ufrag message);
+      stop_recording session
   | Dtls.Server.Established { profile = _; keying } ->
       (* The handshake keeps reporting itself established as the peer repeats
          its last flight; the keys are taken once. *)
@@ -178,9 +261,9 @@ let handle_media session datagram =
               log.debug (fun log ->
                   log "ignoring payload type %d" packet.payload_type)
           | packet ->
-              log.debug (fun log ->
-                  log "Opus: sequence %d, timestamp %lu, %d bytes" packet.sequence
-                    packet.timestamp (String.length packet.payload))))
+              write_packets session
+                (Rtp.Reorder.push session.reorder packet.sequence
+                   (packet.timestamp, packet.payload))))
 
 let handle_datagram socket ~source datagram =
   let session () = Hashtbl.find_opt sessions_by_peer source in
@@ -234,6 +317,7 @@ let rec reap_sessions () =
       if not (Ice.Agent.alive session.ice) then begin
         log.info (fun log ->
             log "forgetting session %s, idle, %.0fs old" ufrag (now -. session.created));
+        stop_recording session;
         Hashtbl.remove sessions ufrag;
         Option.iter (Hashtbl.remove sessions_by_peer) session.ice.peer
       end)
@@ -259,6 +343,10 @@ let () =
         "ADDRESS  interface the HTTP server binds to (default localhost, use          0.0.0.0 to accept connections from other machines)" );
       ("--media-port", Arg.Set_int media_port, "PORT  UDP port for media (default 7000)");
       ("--debug", Arg.Set debug, "  log every datagram that is dropped");
+      ( "--output",
+        Arg.Set_string output_prefix,
+        "PREFIX  recordings are written to PREFIX-<date>.opus (default \
+         recording)" );
       ( "--bind",
         Arg.String (fun address -> bind_ip := Some address),
         "ADDRESS  local address the media socket binds to, when it differs          from the advertised one (behind a NAT, say)" );
@@ -291,5 +379,6 @@ let () =
          Dream.get "/" (fun request ->
              Dream.from_filesystem static_root "index.html" request);
          Dream.post "/webrtc/offer" handle_offer;
+         Dream.post "/webrtc/stop" handle_stop;
          Dream.get "/**" (Dream.static static_root);
        ]

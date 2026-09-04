@@ -8,6 +8,9 @@ const logElement = document.getElementById("log");
 
 let connection = null;
 let stream = null;
+let session = null;
+
+const SESSION_HEADER = "X-Recrtc-Session";
 
 function log(message) {
   logElement.textContent += message + "\n";
@@ -41,6 +44,7 @@ async function start() {
     body: offer.sdp,
   });
   if (!response.ok) throw new Error(await response.text());
+  session = response.headers.get(SESSION_HEADER);
 
   const sdp = await response.text();
   await connection.setRemoteDescription({ type: "answer", sdp });
@@ -48,6 +52,12 @@ async function start() {
 }
 
 function stop() {
+  // Tell the server to close the recording now, rather than leaving it to
+  // notice that the checks have stopped coming.
+  if (session) {
+    fetch("/webrtc/stop", { method: "POST", headers: { [SESSION_HEADER]: session } });
+    session = null;
+  }
   if (connection) {
     connection.close();
     connection = null;

@@ -1,7 +1,7 @@
 (test
  (name test_recrtc)
- (modules test_recrtc testlib test_stun test_srtp)
- (libraries ice mirage-crypto sdp srtp))
+ (modules test_recrtc testlib test_stun test_srtp test_rtp)
+ (libraries ice mirage-crypto oggopus rtp sdp srtp))
 
 ; A standalone DTLS server, to exercise lib/dtls against another
 ; implementation: openssl s_client -dtls1_2 -use_srtp SRTP_AES128_CM_SHA1_80
