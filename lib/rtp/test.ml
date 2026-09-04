@@ -47,6 +47,33 @@ let run () =
   check "giving up on 104" (push 108 = [ 105; 106; 107; 108 ]);
   check "the loss is counted" (Rtp.Reorder.lost buffer = 1);
   check "and the stream carries on" (push 109 = [ 109 ]);
+
+  (* A stream too sparse to reach the depth is bounded by the clock instead:
+     three packets a second would otherwise sit on a gap for as long as it took
+     the depth to fill. *)
+  let buffer = Rtp.Reorder.create ~depth:100 ~deadline:0.2 () in
+  let push now sequence = Rtp.Reorder.push ~now buffer sequence sequence in
+  check "the first packet passes straight through" (push 0. 200 = [ 200 ]);
+  check "a gap is held back" (push 0.1 202 = []);
+  check "and still, a moment later" (push 0.2 203 = []);
+  check "until the deadline passes" (push 0.35 204 = [ 202; 203; 204 ]);
+  check "the loss is counted" (Rtp.Reorder.lost buffer = 1);
+  (* The deadline is only ever tested when something happens, so a track that
+     falls silent mid-gap needs telling that time has passed. *)
+  check "a second gap is held back" (push 0.4 206 = []);
+  check "which no arrival will now release" (Rtp.Reorder.expire ~now:0.5 buffer = []);
+  check "until its deadline passes too"
+    (Rtp.Reorder.expire ~now:0.7 buffer = [ 206 ]);
+  check "and then there is nothing left to expire"
+    (Rtp.Reorder.expire ~now:1.0 buffer = []);
+
+  suite "rtcp";
+  (* RFC 4585 §6.3.1: version 2, feedback message type 1, payload type 206,
+     two words of payload after the header word. *)
+  check_string "a picture loss indication"
+    ~expected:(hex "81CE0002 DEADBEEF 0000002A")
+    (Rtp.Rtcp.pli ~sender:0xDEADBEEFl ~media:42l);
+  check "which reads as RTCP" (Rtp.Packet.is_rtcp (Rtp.Rtcp.pli ~sender:1l ~media:2l));
   ()
 
 let () =

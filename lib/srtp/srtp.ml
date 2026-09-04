@@ -251,3 +251,38 @@ let unprotect_rtcp t packet =
           in
           Ok (header ^ payload)
         end
+
+(* Protecting -------------------------------------------------------------- *)
+
+type sender = { keys : keys; mutable rtcp_index : int }
+
+let sender ~master_key ~master_salt =
+  if String.length master_key <> key_length then
+    invalid_arg "Srtp.sender: the master key must be 16 bytes";
+  if String.length master_salt <> salt_length then
+    invalid_arg "Srtp.sender: the master salt must be 14 bytes";
+  {
+    keys =
+      derive_keys ~master_key ~master_salt ~encryption:Label.rtcp_encryption
+        ~authentication:Label.rtcp_authentication ~salt:Label.rtcp_salt;
+    rtcp_index = 0;
+  }
+
+(* The index is ours to choose and must never repeat under one key, since it is
+   what makes each counter block unique. Thirty-one bits at a handful of
+   packets a second is not a bound anything reaches. *)
+let protect_rtcp t packet =
+  if String.length packet < 8 then invalid_arg "Srtp.protect_rtcp: not an RTCP packet";
+  let index = t.rtcp_index in
+  t.rtcp_index <- (index + 1) land 0x7fffffff;
+  let ssrc = String.get_int32_be packet 4 in
+  (* As on the receiving side, the first two words travel in the clear. *)
+  let header = String.sub packet 0 8 in
+  let payload =
+    cipher t.keys ~ssrc ~index ~data:(String.sub packet 8 (String.length packet - 8))
+  in
+  let trailer = Bytes.create 4 in
+  (* The top bit says the packet is encrypted (RFC 3711 §3.4). *)
+  Bytes.set_int32_be trailer 0 (Int32.logor 0x80000000l (Int32.of_int index));
+  let body = header ^ payload ^ Bytes.unsafe_to_string trailer in
+  body ^ authenticate ~key:t.keys.authentication body

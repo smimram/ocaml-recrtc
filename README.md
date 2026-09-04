@@ -50,8 +50,8 @@ by payload type.
 | `lib/sdp` | parsing an offer, generating the answer |
 | `lib/ice` | STUN codec (RFC 5389) and an ICE-lite agent (RFC 8445) |
 | `lib/dtls` | a DTLS 1.2 server (RFC 6347) exporting SRTP keys (RFC 5764) |
-| `lib/srtp` | unprotecting SRTP and SRTCP (RFC 3711) |
-| `lib/rtp` | RTP packets, a jitter buffer, VP8, VP9 and H.264 payload formats |
+| `lib/srtp` | unprotecting SRTP and SRTCP (RFC 3711), and protecting the SRTCP we send |
+| `lib/rtp` | RTP packets, a jitter buffer, keyframe requests, VP8, VP9 and H.264 payload formats |
 | `lib/oggopus` | writing Ogg pages and an Opus stream (RFC 7845) |
 | `lib/matroska` | writing EBML and a Matroska file (RFC 9559) |
 | `src` | the HTTP server, the media socket and the sessions |
@@ -93,8 +93,9 @@ the timeline as well as the pixels. Add `&audio` for audio alone, or
 
 - The client certificate is not requested, so the fingerprint in the offer is
   not checked against the one the browser presents.
-- No RTCP is sent back: no receiver reports, so the browser gets no feedback
-  on what arrived, and no keyframe can be asked for when one is lost.
+- The only RTCP sent back is a keyframe request when a picture is lost. There
+  are no receiver reports, so the browser gets no feedback on what arrived and
+  nothing to size its bitrate against.
 - The two tracks are lined up by when their first packets arrived, not by the
   NTP-to-RTP mapping in the browser's sender reports, which we decrypt and do
   not read. Good to a few tens of milliseconds, not to the sample.

@@ -1,12 +1,16 @@
 # srtp
 
-Unprotecting SRTP and SRTCP (RFC 3711) under `AES_CM_128_HMAC_SHA1_80`, the
-profile DTLS-SRTP negotiates with browsers: AES-128 in counter mode for
+SRTP and SRTCP (RFC 3711) under `AES_CM_128_HMAC_SHA1_80`, the profile
+DTLS-SRTP negotiates with browsers: AES-128 in counter mode for
 confidentiality, an 80-bit HMAC-SHA1 tag for authentication.
 
-**Receiving only.** The server never sends media, so there is no protect side.
-Adding one would mean little more than running the same primitives the other
-way — counter mode is its own inverse — but nothing needs it yet.
+**Media travels one way**, so of RTP only the receiving half exists. Of RTCP
+there is also a protect side, `sender` and `protect_rtcp`, for the keyframe
+requests that are the one thing a recorder has to say back. It runs the same
+primitives the other way, counter mode being its own inverse, under the
+server's half of the exported keying material rather than the client's, and
+counts its own index up from zero — that index is what keeps two identical
+packets from sharing a counter block.
 
 ## Key derivation
 

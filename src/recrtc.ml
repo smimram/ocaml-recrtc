@@ -66,6 +66,13 @@ type video = {
   (* Everything before the first keyframe is dropped, so that the recording
      opens on a picture that can be decoded on its own. *)
   mutable started : bool;
+  (* The source the pictures come from, which a keyframe request has to name.
+     It is not known until the first packet arrives. *)
+  mutable ssrc : int32 option;
+  (* Since when a lost packet has left the stream undecodable, and when we last
+     asked for the keyframe that would end it. *)
+  mutable damaged_since : float option;
+  mutable asked_at : float;
 }
 
 type container = Ogg of Oggopus.Writer.t | Matroska of Matroska.Writer.t
@@ -79,6 +86,12 @@ type session = {
   ice : Ice.Agent.t;
   dtls : Dtls.Server.t;
   mutable srtp : Srtp.t option;
+  (* The other half of the keying material: what the keyframe requests, the
+     only thing we ever send, are protected with. *)
+  mutable srtp_sender : Srtp.sender option;
+  (* Our own synchronisation source. We send no media, so it names us in
+     feedback packets and nowhere else. *)
+  sender_ssrc : int32;
   audio : audio option;
   (* Cleared if the camera never produces a picture, so that a session that
      offered video but sends none still leaves a recording of its audio. *)
@@ -361,6 +374,9 @@ let handle_offer request =
                   video_reorder = Rtp.Reorder.create ~depth:128 ();
                   frames = Rtp.Frame.create format;
                   started = false;
+                  ssrc = None;
+                  damaged_since = None;
+                  asked_at = 0.;
                 })
               (match String.lowercase_ascii codec.name with
               | "vp8" -> Some Rtp.Frame.Vp8
@@ -373,6 +389,8 @@ let handle_offer request =
           ice;
           dtls = Dtls.Server.create (Lazy.force dtls_config);
           srtp = None;
+          srtp_sender = None;
+          sender_ssrc = Random.int32 Int32.max_int;
           audio;
           video;
           recording = None;
@@ -507,15 +525,102 @@ let handle_dtls socket ~source session datagram =
           Some
             (Srtp.create ~master_key:keying.srtp_client_key
                ~master_salt:keying.srtp_client_salt);
+        session.srtp_sender <-
+          Some
+            (Srtp.sender ~master_key:keying.srtp_server_key
+               ~master_salt:keying.srtp_server_salt);
         log.info (fun log ->
             log "session %s: DTLS established, SRTP keys in hand"
               (ufrag session))
       end);
   Lwt.return_unit
 
+(* Feedback ---------------------------------------------------------------- *)
+
+(* A datagram sent from within the media path, where there is no Lwt thread to
+   sequence it into. Nothing depends on when it leaves, or on its leaving at
+   all: a lost keyframe request is asked again a moment later. *)
+let send_async socket ~destination datagram =
+  Lwt.async (fun () -> send socket ~destination datagram)
+
+(* How often a keyframe may be asked for. A request costs the browser a whole
+   picture, so asking once per lost packet would answer a burst of loss with a
+   burst of keyframes; one in flight at a time is enough. *)
+let pli_interval = 0.5
+
+(* How long the recording waits for the keyframe it asked for before writing
+   pictures that are known to be corrupt. A browser that honours the request
+   answers within a round trip; one that does not would otherwise leave us
+   recording nothing at all, and a damaged picture beats a missing one. *)
+let keyframe_timeout = 2.
+
+(* After a lost packet every picture predicted from the one it ruined is ruined
+   too, and a browser sends a fresh keyframe only when asked (RFC 4585 §6.3.1);
+   left alone it would carry the corruption to the end of the recording. *)
+let request_keyframe socket session video ~now =
+  match (session.srtp_sender, Ice.Agent.peer session.ice, video.ssrc) with
+  | Some sender, Some destination, Some ssrc when now -. video.asked_at > pli_interval
+    ->
+      video.asked_at <- now;
+      let pli = Rtp.Rtcp.pli ~sender:session.sender_ssrc ~media:ssrc in
+      send_async socket ~destination (Srtp.protect_rtcp sender pli);
+      log.debug (fun log -> log "session %s: asked for a keyframe" (ufrag session))
+  | _ -> ()
+
+(* Media ------------------------------------------------------------------- *)
+
+let deliver_audio session packets =
+  List.iter
+    (fun (timestamp, payload) -> write_audio session ~timestamp payload)
+    packets
+
+let deliver_video socket session video packets =
+  let now = Unix.gettimeofday () in
+  List.iter
+    (fun packet ->
+      let dropped = Rtp.Frame.dropped video.frames in
+      let frames = Rtp.Frame.push video.frames packet in
+      (* A picture the loss of a packet made unusable. Nothing after it is
+         decodable either, so the recording pauses there and asks for the
+         keyframe that will let it resume. *)
+      if Rtp.Frame.dropped video.frames > dropped && video.started then begin
+        if video.damaged_since = None then begin
+          video.damaged_since <- Some now;
+          log.debug (fun log ->
+              log "session %s: lost a picture, waiting for a keyframe"
+                (ufrag session))
+        end;
+        request_keyframe socket session video ~now
+      end;
+      List.iter
+        (fun (frame : Rtp.Frame.frame) ->
+          (* Nothing before the first keyframe can be decoded, so nothing
+             before it is worth keeping. *)
+          if frame.keyframe then begin
+            if video.damaged_since <> None then
+              log.debug (fun log ->
+                  log "session %s: keyframe, recording resumes" (ufrag session));
+            video.started <- true;
+            video.damaged_since <- None
+          end;
+          let writable =
+            video.started
+            &&
+            match video.damaged_since with
+            | None -> true
+            | Some since -> now -. since > keyframe_timeout
+          in
+          if writable then write_frame session frame
+          else if video.damaged_since <> None then
+            (* The keyframe has not come; keep asking for as long as pictures
+               keep arriving that cannot be used. *)
+            request_keyframe socket session video ~now)
+        frames)
+    packets
+
 (* The two streams share a transport under BUNDLE and are told apart by their
    payload type, which the answer fixed one per kind. *)
-let handle_rtp session (packet : Rtp.Packet.t) =
+let handle_rtp socket session (packet : Rtp.Packet.t) =
   let matching payload_type = function
     | Some x when payload_type x = packet.payload_type -> Some x
     | _ -> None
@@ -524,33 +629,39 @@ let handle_rtp session (packet : Rtp.Packet.t) =
   let video = matching (fun v -> v.video_codec.payload_type) session.video in
   match (audio, video) with
   | Some audio, _ ->
-      List.iter
-        (fun (timestamp, payload) -> write_audio session ~timestamp payload)
+      deliver_audio session
         (Rtp.Reorder.push audio.audio_reorder packet.sequence
            (packet.timestamp, packet.payload))
   | _, Some video ->
-      List.iter
-        (fun packet ->
-          List.iter
-            (fun (frame : Rtp.Frame.frame) ->
-              (* Nothing before the first keyframe can be decoded, so nothing
-                 before it is worth keeping. *)
-              if frame.keyframe then video.started <- true;
-              if video.started then write_frame session frame)
-            (Rtp.Frame.push video.frames packet))
+      if video.ssrc = None then video.ssrc <- Some packet.ssrc;
+      deliver_video socket session video
         (Rtp.Reorder.push video.video_reorder packet.sequence packet)
   | None, None ->
       (* Comfort noise, retransmissions, redundancy and the codecs we turned
          down all arrive on payload types of their own. *)
       log.debug (fun log -> log "ignoring payload type %d" packet.payload_type)
 
-let handle_media session datagram =
+(* A jitter buffer only reconsiders a gap when something is pushed into it, so
+   a track that goes quiet mid-gap would hold what it has indefinitely while
+   the other track carries on. Every datagram of the session is an occasion to
+   look at both. *)
+let expire_reorders socket session =
+  Option.iter
+    (fun audio -> deliver_audio session (Rtp.Reorder.expire audio.audio_reorder))
+    session.audio;
+  Option.iter
+    (fun video ->
+      deliver_video socket session video (Rtp.Reorder.expire video.video_reorder))
+    session.video
+
+let handle_media socket session datagram =
   match session.srtp with
   | None ->
       (* Media before the handshake finished: there is nothing to decrypt it
          with yet. *)
       log.debug (fun log -> log "media before the SRTP keys were exchanged")
   | Some srtp -> (
+      expire_reorders socket session;
       let unprotect =
         if Rtp.Packet.is_rtcp datagram then Srtp.unprotect_rtcp srtp
         else Srtp.unprotect srtp
@@ -565,7 +676,7 @@ let handle_media session datagram =
           match Rtp.Packet.parse packet with
           | exception Rtp.Packet.Invalid message ->
               log.warning (fun log -> log "malformed RTP packet: %s" message)
-          | packet -> handle_rtp session packet))
+          | packet -> handle_rtp socket session packet))
 
 let handle_datagram socket ~source datagram =
   let session () = Hashtbl.find_opt sessions_by_peer source in
@@ -581,7 +692,7 @@ let handle_datagram socket ~source datagram =
   | b when b >= 128 && b < 192 ->
       (match session () with
       | None -> log.debug (fun log -> log "media from an unknown peer")
-      | Some session -> handle_media session datagram);
+      | Some session -> handle_media socket session datagram);
       Lwt.return_unit
   | b ->
       log.debug (fun log -> log "unrecognised datagram starting with 0x%02x" b);
