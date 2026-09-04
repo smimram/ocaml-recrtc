@@ -58,9 +58,20 @@ let session_header = "X-Recrtc-Session"
 
 let recording_path () =
   let now = Unix.localtime (Unix.gettimeofday ()) in
-  Printf.sprintf "%s-%04d%02d%02d-%02d%02d%02d.opus" !output_prefix
-    (now.tm_year + 1900) (now.tm_mon + 1) now.tm_mday now.tm_hour now.tm_min
-    now.tm_sec
+  let stamp =
+    Printf.sprintf "%s-%04d%02d%02d-%02d%02d%02d" !output_prefix
+      (now.tm_year + 1900) (now.tm_mon + 1) now.tm_mday now.tm_hour now.tm_min
+      now.tm_sec
+  in
+  (* Two sessions can start within the same second, and neither may overwrite
+     the other. *)
+  let rec free n =
+    let path =
+      if n = 1 then stamp ^ ".opus" else Printf.sprintf "%s-%d.opus" stamp n
+    in
+    if Sys.file_exists path then free (n + 1) else path
+  in
+  free 1
 
 (* The file is opened on the first packet: its header describes the stream, and
    until a packet has arrived there is nothing to describe. *)
