@@ -1,4 +1,6 @@
-IP ?= 127.0.0.1
+# Only needed when the address to advertise is not one this machine can see,
+# such as the public side of a port forwarding.
+IP ?=
 
 all: build
 
@@ -9,7 +11,7 @@ test:
 	@dune test
 
 serve: build
-	@dune exec src/recrtc.exe -- --ip $(IP) $(ARGS)
+	@dune exec src/recrtc.exe -- $(if $(IP),--ip $(IP)) $(ARGS)
 
 clean:
 	@dune clean

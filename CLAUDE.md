@@ -18,12 +18,14 @@ the build path described here.
 ```sh
 make                     # dune build
 make test                # dune test  (add --force: dune caches a passing run)
-make serve IP=<address>  # dune exec src/recrtc.exe -- --ip <address>
+make serve               # dune exec src/recrtc.exe
+make serve IP=<address>  # override the advertised candidates
 make serve ARGS=--debug  # extra flags
 ```
 
-`--ip` is effectively required for anything but a same-machine loopback test;
-see "The advertised address" below. `--debug` logs every dropped datagram.
+`--debug` logs every dropped datagram. `--ip` is only needed when the address
+to advertise is not one the machine can see for itself; see "The advertised
+address" below.
 
 Tests are one executable (`dune exec test/test_recrtc.exe`) built from
 `test/testlib.ml` plus one module per area. There is no per-test filter: to run
@@ -85,14 +87,20 @@ one SRTP profile, no application data over DTLS, audio only.
 
 ## Things that will bite you
 
-**The advertised address.** The media socket binds to the address given by
-`--ip` rather than to every interface. This is not a detail: a peer discards a
-check response that arrives from an address other than the one it wrote to
-(RFC 8445 §7.2.5.2.1), and a wildcard socket lets the routing table pick the
-source. Chrome pairs *its* LAN candidate against our loopback candidate, so an
-unreachable `--ip 127.0.0.1` fails in a way that looks like silence: ICE
-latches on our side while the browser sits in `checking` forever. `--bind` sets
-the local address separately, for a server behind a 1:1 NAT.
+**The advertised address.** Two constraints pull against each other here.
+A peer discards a check response arriving from an address other than the one it
+wrote to (RFC 8445 §7.2.5.2.1), which argues for binding the media socket to
+the single address we advertise. But a browser only pairs its own candidates
+with ones it can route to, and it gathers no loopback candidate when a real
+interface exists — so advertising `127.0.0.1` alone strands a browser on this
+very machine, in a way that looks like silence: ICE latches on our side while
+the browser sits in `checking` and then `failed`.
+
+So the default advertises every address of the machine, loopback last, and
+binds the wildcard; the routing table then picks a source that agrees with the
+destination for every pair a peer can actually reach us on. Passing a single
+`--ip` goes back to binding that address exactly. `--bind` sets the local
+address independently, for a server behind a 1:1 NAT.
 
 **Evaluation order in flight construction.** `handshake_records` takes the next
 handshake sequence number and appends to the transcript as a side effect.

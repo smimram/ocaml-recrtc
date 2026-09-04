@@ -9,11 +9,11 @@ let http_port = ref 8080
 let http_interface = ref "localhost"
 let media_port = ref 7000
 
-(* The address we advertise as our host candidate. It must be the one the
-   browser can reach: the loopback for local use, otherwise the machine's LAN
-   address, or its public address when the server sits behind a port
-   forwarding. *)
-let advertised_ip = ref "127.0.0.1"
+(* The addresses we advertise as host candidates, most preferred first. By
+   default the machine's own addresses, which covers a browser on this machine
+   as well as one on the network; a server behind a port forwarding has to be
+   told its public address with --ip. *)
+let advertised_ips = ref []
 
 (* The media socket is bound to the advertised address rather than to every
    interface, so that our answers to connectivity checks always leave from the
@@ -27,6 +27,26 @@ let debug = ref false
 (* Recordings are named after the moment they start, so that concurrent or
    successive sessions never overwrite one another. *)
 let output_prefix = ref "recording"
+
+(* Which address the kernel would use to reach the outside world. Connecting a
+   datagram socket sends nothing: it only consults the routing table. The
+   address is from the range reserved for documentation, so nothing can come of
+   it even if a packet were sent. *)
+let primary_address () =
+  let socket = Unix.socket PF_INET SOCK_DGRAM 0 in
+  Fun.protect
+    ~finally:(fun () -> Unix.close socket)
+    (fun () ->
+      match
+        Unix.connect socket (Unix.ADDR_INET (Unix.inet_addr_of_string "203.0.113.1", 9));
+        Unix.getsockname socket
+      with
+      | Unix.ADDR_INET (ip, _) -> [ Unix.string_of_inet_addr ip ]
+      | _ | (exception Unix.Unix_error _) -> [])
+
+(* The loopback comes last: a peer elsewhere on the network cannot use it, and
+   one on this machine can use either. *)
+let default_addresses () = primary_address () @ [ "127.0.0.1" ]
 
 type session = {
   ice : Ice.Agent.t;
@@ -134,7 +154,7 @@ let handle_offer request =
       in
       Hashtbl.replace sessions ice.local.ufrag session;
       let answer =
-        Sdp.answer ~offer ~ip:!advertised_ip ~port:!media_port
+        Sdp.answer ~offer ~addresses:!advertised_ips ~port:!media_port
           ~ice_ufrag:ice.local.ufrag ~ice_pwd:ice.local.pwd
           ~fingerprint:("sha-256", (Lazy.force certificate).fingerprint)
           ()
@@ -335,12 +355,19 @@ let rec reap_sessions () =
     (Hashtbl.copy sessions);
   reap_sessions ()
 
+(* With one advertised address we can bind to it; with several, only the
+   wildcard covers them all. *)
+let bind_address () =
+  match (!bind_ip, !advertised_ips) with
+  | Some address, _ -> address
+  | None, [ address ] -> address
+  | None, _ -> "0.0.0.0"
+
 let media_socket () =
   let socket = Lwt_unix.socket PF_INET SOCK_DGRAM 0 in
   Lwt_unix.setsockopt socket SO_REUSEADDR true;
-  let address = Option.value !bind_ip ~default:!advertised_ip in
   Lwt_unix.bind socket
-    (Unix.ADDR_INET (Unix.inet_addr_of_string address, !media_port))
+    (Unix.ADDR_INET (Unix.inet_addr_of_string (bind_address ()), !media_port))
   |> Lwt.map (fun () -> socket)
 
 (* Entry point ------------------------------------------------------------ *)
@@ -362,12 +389,14 @@ let () =
         Arg.String (fun address -> bind_ip := Some address),
         "ADDRESS  local address the media socket binds to, when it differs          from the advertised one (behind a NAT, say)" );
       ( "--ip",
-        Arg.Set_string advertised_ip,
-        "ADDRESS  the address advertised as our ICE candidate, which must be \
-         reachable by the browser (default 127.0.0.1)" );
+        Arg.String (fun address -> advertised_ips := !advertised_ips @ [ address ]),
+        "ADDRESS  an address to advertise as an ICE candidate, which must be \
+         reachable by the browser; may be repeated, most preferred first \
+         (default: this machine's own addresses)" );
     ]
     (fun argument -> raise (Arg.Bad ("unexpected argument: " ^ argument)))
     "recrtc [options]";
+  if !advertised_ips = [] then advertised_ips := default_addresses ();
   Dream.initialize_log ~level:(if !debug then `Debug else `Info) ();
   (* The sub-log keeps the threshold it was created with, so it needs telling
      separately. *)
@@ -378,9 +407,9 @@ let () =
   Lwt.async (fun () ->
       let%lwt socket = media_socket () in
       log.info (fun log ->
-          log "media socket listening on %s:%d"
-            (Option.value !bind_ip ~default:!advertised_ip)
-            !media_port);
+          log "media socket listening on %s:%d, advertising %s" (bind_address ())
+            !media_port
+            (String.concat ", " !advertised_ips));
       media_loop socket);
   Lwt.async reap_sessions;
   Dream.run ~interface:!http_interface ~port:!http_port

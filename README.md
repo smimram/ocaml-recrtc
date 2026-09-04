@@ -6,7 +6,7 @@ implemented here, in OCaml, since none of it exists in opam.
 
 ```
 make serve                       # then open http://localhost:8080
-make serve IP=192.168.1.10       # to record from another machine
+make serve IP=203.0.113.7        # only if we cannot see the address ourselves
 ```
 
 Press *Record*, allow the microphone, press *Stop*: the server writes
@@ -20,8 +20,11 @@ then arrives on one UDP port, where STUN, DTLS and SRTP are demultiplexed by
 their first byte (RFC 7983).
 
 - The browser's connectivity checks are answered from the socket they arrived
-  on, which is what opens the mapping when the browser is behind a NAT. The
-  advertised address must be one the browser can reach: pass `--ip`.
+  on, which is what opens the mapping when the browser is behind a NAT. Every
+  address of this machine is advertised as a candidate, the loopback last, so
+  that a browser here and a browser on the network each find one they can pair
+  with. `--ip` overrides the list, which is what a server behind a port
+  forwarding needs.
 - DTLS exists only to agree on SRTP keys — there is no application data, so
   the handshake is cut to one cipher suite, `ECDHE-ECDSA-AES128-GCM-SHA256`,
   against a self-signed P-256 certificate made at start-up.

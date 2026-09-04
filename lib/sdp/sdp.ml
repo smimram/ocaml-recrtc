@@ -200,9 +200,27 @@ let parse_offer sdp =
 
 (* Generation ------------------------------------------------------------- *)
 
+(** The priority of a host candidate (RFC 8445 §5.1.2.1). The type preference
+    of a host candidate is 126 and the component is always 1 here, so only the
+    local preference distinguishes ours; [rank] counts down from the address we
+    would rather be reached on. *)
+let host_priority rank =
+  let local_preference = max 0 (65535 - rank) in
+  (126 * 0x1000000) + (local_preference * 256) + 255
+
 (** The answer to [offer]: we are an ICE-lite, DTLS-passive, receive-only
-    endpoint with a single host candidate at [ip]:[port]. *)
-let answer ~offer ~ip ~port ~ice_ufrag ~ice_pwd ~fingerprint () =
+    endpoint reachable at [port] on each of [addresses], most preferred first.
+
+    Several are worth offering because the peer pairs its own candidates with
+    ours by address family and route: a browser on the same machine as the
+    server has no loopback candidate of its own to pair with a loopback one of
+    ours, and would find nothing to check against. *)
+let answer ~offer ~addresses ~port ~ice_ufrag ~ice_pwd ~fingerprint () =
+  let ip =
+    match addresses with
+    | ip :: _ -> ip
+    | [] -> invalid_arg "Sdp.answer: no address to advertise"
+  in
   let buffer = Buffer.create 1024 in
   let line fmt = Printf.ksprintf (fun s -> Buffer.add_string buffer (s ^ "\r\n")) fmt in
   let algorithm, digest = fingerprint in
@@ -228,6 +246,10 @@ let answer ~offer ~ip ~port ~ice_ufrag ~ice_pwd ~fingerprint () =
     offer.opus.channels;
   (* Echoed verbatim: the browser chose these parameters for its encoder. *)
   Option.iter (fun fmtp -> line "a=fmtp:%d %s" pt fmtp) offer.opus.fmtp;
-  line "a=candidate:1 1 udp 2130706431 %s %d typ host" ip port;
+  List.iteri
+    (fun rank address ->
+      line "a=candidate:%d 1 udp %d %s %d typ host" (rank + 1)
+        (host_priority rank) address port)
+    addresses;
   line "a=end-of-candidates";
   Buffer.contents buffer
