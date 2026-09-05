@@ -4,7 +4,10 @@
     socket shared by every session, on which STUN, DTLS and SRTP are
     multiplexed (RFC 7983). *)
 
-let static_root = "static"
+(* The page and its script, as a path relative to where the server is started
+   from: the default is the one that works when it is started from the root of
+   the repository, which is what "make serve" does. *)
+let static_root = ref "examples/recrtc/static"
 let http_port = ref 8080
 let http_interface = ref "localhost"
 let media_port = ref 7000
@@ -849,6 +852,10 @@ let () =
         "ADDRESS  interface the HTTP server binds to (default localhost, use          0.0.0.0 to accept connections from other machines)" );
       ("--media-port", Arg.Set_int media_port, "PORT  UDP port for media (default 7000)");
       ("--debug", Arg.Set debug, "  log every datagram that is dropped");
+      ( "--static",
+        Arg.Set_string static_root,
+        "DIRECTORY  the directory the page is served from (default \
+         examples/recrtc/static)" );
       ( "--output",
         Arg.Set_string output_prefix,
         "PREFIX  recordings are written to PREFIX-<date>.opus (default \
@@ -886,8 +893,8 @@ let () =
   @@ Dream.router
        [
          Dream.get "/" (fun request ->
-             Dream.from_filesystem static_root "index.html" request);
+             Dream.from_filesystem !static_root "index.html" request);
          Dream.post "/webrtc/offer" handle_offer;
          Dream.post "/webrtc/stop" handle_stop;
-         Dream.get "/**" (Dream.static static_root);
+         Dream.get "/**" (Dream.static !static_root);
        ]

@@ -11,7 +11,7 @@ test:
 	@dune test
 
 serve: build
-	@dune exec src/recrtc.exe -- $(if $(IP),--ip $(IP)) $(ARGS)
+	@dune exec examples/recrtc/src/recrtc.exe -- $(if $(IP),--ip $(IP)) $(ARGS)
 
 clean:
 	@dune clean

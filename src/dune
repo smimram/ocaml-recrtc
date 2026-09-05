@@ -1,5 +1,0 @@
-(executable
- (name recrtc)
- (libraries dream dtls ice matroska oggopus rtp sdp srtp lwt.unix
-   mirage-crypto-rng.unix)
- (preprocess (pps lwt_ppx)))

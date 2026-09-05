@@ -1,4 +1,5 @@
 (library
  (name dtls)
+ (public_name webrtc.dtls)
  (libraries digestif mirage-crypto mirage-crypto-ec mirage-crypto-rng ptime
    ptime.clock.os tls x509))

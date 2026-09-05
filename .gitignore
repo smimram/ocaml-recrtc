@@ -2,3 +2,4 @@ _build
 *~
 *.webm
 *.opus
+*.install

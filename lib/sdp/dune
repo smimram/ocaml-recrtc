@@ -1,2 +1,3 @@
 (library
- (name sdp))
+ (name sdp)
+ (public_name webrtc.sdp))

@@ -4,11 +4,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-`recrtc` records what a browser sends over WebRTC — Opus audio, and VP8, VP9
-or H.264 video — as an Ogg/Opus or Matroska file. The WebRTC transport stack is
-implemented here because none of it exists in opam: `tls` has no DTLS, and
-there is no STUN, ICE, SRTP or SDP package. `README.md` describes the result;
-this file is about working on it.
+This repository is a set of OCaml libraries for WebRTC — SDP, ICE and STUN,
+DTLS with the SRTP key exchange, SRTP, RTP with its payload formats, and the
+Ogg/Opus and Matroska muxers that store what arrives — written because none of
+it exists in opam: `tls` has no DTLS, and there is no STUN, ICE, SRTP or SDP
+package. They install as one opam package, `webrtc`, whose libraries are
+`webrtc.sdp`, `webrtc.ice` and so on; inside the repository they are still
+referred to by their bare names (`sdp`, `ice`, …).
+
+`examples/recrtc` is the example they were written for, and the only consumer
+of them here: a web server that records what a browser sends over WebRTC —
+Opus audio, and VP8, VP9 or H.264 video — as an Ogg/Opus or Matroska file. It
+is a package of its own, `recrtc`. `README.md` describes the libraries and
+`examples/recrtc/README.md` the server; this file is about working on them.
 
 `experiments/recws/` is a separate, self-contained predecessor that uploaded
 `MediaRecorder` chunks over HTTP. It is kept for reference and is not part of
@@ -19,16 +27,18 @@ the build path described here.
 ```sh
 make                     # dune build
 make test                # dune test  (add --force: dune caches a passing run)
-make serve               # dune exec src/recrtc.exe
+make serve               # dune exec examples/recrtc/src/recrtc.exe
 make serve IP=<address>  # override the advertised candidates
 make serve ARGS=--debug  # extra flags
 ```
 
 `--debug` logs every dropped datagram, and the offer and answer in full, which
 is usually the fastest way to see why a browser is not sending something.
-`--ip` is only needed when the address
-to advertise is not one the machine can see for itself; see "The advertised
-address" below.
+The page is served from `examples/recrtc/static`, as a path relative to where
+the server is started from — the root of the repository, which is what `make
+serve` does; `--static` is for anywhere else. `--ip` is only needed when the
+address to advertise is not one the machine can see for itself; see "The
+advertised address" below.
 
 Tests live beside the code they cover: each library that has any carries a
 `test.ml` next to its modules, run by a `(test)` stanza in the same `dune` file
@@ -63,8 +73,8 @@ chromium --headless=new --no-sandbox --use-fake-ui-for-media-stream \
   --use-fake-device-for-media-stream "http://localhost:8080/?autostart"
 ```
 
-The `?autostart` hook in `static/recrtc.js` exists for exactly this; `&audio`
-records audio alone, and `&codec=vp9` or `&codec=h264` narrows the offer
+The `?autostart` hook in `examples/recrtc/static/recrtc.js` exists for exactly
+this; `&audio` records audio alone, and `&codec=vp9` or `&codec=h264` narrows the offer
 through `setCodecPreferences` so the other video paths can be reached, since a
 browser otherwise always picks VP8 from what we accept.
 
@@ -84,8 +94,8 @@ ffmpeg -ss 5 -i recording-*.webm -frames:v 1 frame.png
 
 Signalling is one HTTP exchange; all media arrives on a **single UDP socket
 shared by every session**, where STUN, DTLS and SRTP are demultiplexed by the
-first byte of the datagram (RFC 7983). `src/recrtc.ml` holds that loop and the
-session table; the libraries under `lib/` are transport pieces that know
+first byte of the datagram (RFC 7983). `examples/recrtc/src/recrtc.ml` holds
+that loop and the session table; the libraries under `lib/` are transport pieces that know
 nothing about sockets or Dream.
 
 A session is found two ways, and both must stay in step: by the local ICE
@@ -109,8 +119,8 @@ function of it that reads the clock takes an optional `?now`, so the tests stay
 deterministic.
 
 `Dtls.Server` is a pure state machine — `handle : t -> datagram -> datagram
-list * event` — which is what lets `test/dtls_harness.exe` and `src/recrtc.ml`
-drive the same code. Keep it that way.
+list * event` — which is what lets `test/dtls_harness.exe` and
+`examples/recrtc/src/recrtc.ml` drive the same code. Keep it that way.
 
 Deliberate scope limits, all load-bearing: ICE-lite (we never send checks),
 `a=setup:passive` (so only the DTLS *server* side exists), one cipher suite,
@@ -178,8 +188,8 @@ and the recording does not start until the first keyframe.
 
 That is also why loss is answered with a keyframe request: a browser sends a
 fresh keyframe only when asked, so without one the corruption runs to the end
-of the recording. `request_keyframe` in `src/recrtc.ml` sends the PLI, at most
-one every `pli_interval`, and video stops being written until the keyframe
+of the recording. `request_keyframe` in `examples/recrtc/src/recrtc.ml` sends
+the PLI, at most one every `pli_interval`, and video stops being written until the keyframe
 arrives — or until `keyframe_timeout` passes, since a peer that ignores the
 request must not leave us recording nothing at all. Chromium's `outbound-rtp`
 statistics are where to look if this seems not to work: `pliCount` says whether
@@ -191,8 +201,8 @@ ways, by depth and by a deadline, because a stream of a few packets a second
 never reaches the depth and a stream of hundreds reaches it having buffered far
 more than it needs. But both are tested inside `push`, so a track that falls
 silent mid-gap holds what it has for as long as the silence lasts. `expire` is
-what covers that, and `src/recrtc.ml` calls it for both tracks on every
-datagram of the session — video's gaps are therefore also aired by audio's
+what covers that, and `examples/recrtc/src/recrtc.ml` calls it for both tracks
+on every datagram of the session — video's gaps are therefore also aired by audio's
 packets.
 
 **Matroska lengths of all ones are reserved.** A variable-width integer whose
@@ -242,6 +252,9 @@ only its duration. Worth re-checking after touching `lib/matroska/writer.ml`.
 - A library whose name matches one of its modules makes that module the only
   entry point, which is why `lib/ice` has `agent.ml` and `stun.ml` and no
   `ice.ml`.
+- Every library under `lib/` is public, `(public_name webrtc.<name>)`, so a new
+  one needs that line too and its modules are part of the installed API: an
+  `.mli` there is documentation that ships.
 - Commit messages: a short capitalized sentence ending with a period, then a
   body explaining the reasoning, wrapped at 72 columns.
 - Untracked `*~` files are Emacs backups — leave them alone.

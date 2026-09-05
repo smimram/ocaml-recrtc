@@ -1,5 +1,6 @@
 (library
  (name oggopus)
+ (public_name webrtc.oggopus)
  (modules :standard \ test)
  (libraries rtp))
 

@@ -1,5 +1,6 @@
 (library
  (name ice)
+ (public_name webrtc.ice)
  (modules :standard \ test)
  (libraries digestif ipaddr ipaddr.unix mirage-crypto-rng unix))
 

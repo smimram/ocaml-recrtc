@@ -1,5 +1,6 @@
 (library
  (name srtp)
+ (public_name webrtc.srtp)
  (modules :standard \ test)
  (libraries digestif mirage-crypto rtp))
 
